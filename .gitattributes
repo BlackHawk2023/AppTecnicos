@@ -1,0 +1,9 @@
+# Force LF for text files in this repo
+* text=auto eol=lf
+
+# JSON and JS files as text
+*.json text eol=lf
+*.js text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.md text eol=lf

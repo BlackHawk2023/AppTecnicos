@@ -1,0 +1,43 @@
+# Root .gitignore for d:\APP workspace
+
+# Node dependencies
+node_modules/
+
+# Expo
+.expo/
+expo-env.d.ts
+dist/
+web-build/
+*.hbc
+
+# Generated native folders
+android/
+ios/
+
+# Local IDE/editor settings
+.idea/
+.vscode/
+
+# Expo/React Native build artifacts
+*.tsbuildinfo
+.metro-health-check*
+*.orig.*
+
+# Debug logs
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# Mac files
+.DS_Store
+
+# Private keys and provisioning profiles
+*.pem
+*.p12
+*.p8
+*.key
+*.jks
+*.mobileprovision
+
+# Environment files
+.env*
