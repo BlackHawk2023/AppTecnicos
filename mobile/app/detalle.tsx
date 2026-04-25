@@ -23,6 +23,20 @@ export default function ServiceDetailScreen() {
         novedades: any[];
     }>({ visible: false, novedades: [] });
 
+    // Descripción de la cita modal state
+    const [descripcionCitaModal, setDescripcionCitaModal] = useState<{
+        visible: boolean;
+        descripcion: string;
+        observaciones: string;
+    }>({ visible: false, descripcion: '', observaciones: '' });
+
+    // Customer / instrucciones por partida modal state
+    const [partidaInfoModal, setPartidaInfoModal] = useState<{
+        visible: boolean;
+        customer?: string;
+        instrucciones?: string;
+    }>({ visible: false });
+
     // App notificaciones modal state
     const [notifModal, setNotifModal] = useState<{
         visible: boolean;
@@ -128,7 +142,23 @@ export default function ServiceDetailScreen() {
             }
         });
     };
+    const handleShowDescripcionCita = () => {
+        if (!clientInfo?.descripcion_cita && !clientInfo?.observaciones_cita) return;
+        setDescripcionCitaModal({
+            visible: true,
+            descripcion: clientInfo.descripcion_cita || '',
+            observaciones: clientInfo.observaciones_cita || '',
+        });
+    };
 
+    const handleShowPartidaInfo = (p: any) => {
+        if (!p.customer && !p.instrucciones) return;
+        setPartidaInfoModal({
+            visible: true,
+            customer: p.customer,
+            instrucciones: p.instrucciones,
+        });
+    };
     // Navigate to order generation (will need to select partidas there)
     const handleGenerarOrden = () => {
         router.push({
@@ -242,6 +272,12 @@ export default function ServiceDetailScreen() {
                             <Text style={styles.value}>{p.cantidad_papel} rollo(s)</Text>
                         </View>
                     )}
+                    {(p.customer || p.instrucciones) && (
+                        <TouchableOpacity style={styles.partidaInfoButton} onPress={() => handleShowPartidaInfo(p)}>
+                            <Ionicons name="information-circle" size={18} color="#fff" style={{ marginRight: 8 }} />
+                            <Text style={styles.partidaInfoText}>Ver indicaciones</Text>
+                        </TouchableOpacity>
+                    )}
                 </View>
             </View>
         );
@@ -274,6 +310,12 @@ export default function ServiceDetailScreen() {
                     {!!clientInfo.localidad && (
                         <Text style={styles.location}>{clientInfo.localidad}, {clientInfo.provincia}</Text>
                     )}
+                    {(clientInfo.descripcion_cita || clientInfo.observaciones_cita) ? (
+                        <TouchableOpacity style={styles.citaInfoButton} onPress={handleShowDescripcionCita}>
+                            <Ionicons name="document-text" size={18} color="#fff" style={{ marginRight: 8 }} />
+                            <Text style={styles.citaInfoText}>Ver info de la cita</Text>
+                        </TouchableOpacity>
+                    ) : null}
                 </View>
 
                 <View style={styles.actionsContainer}>
@@ -351,6 +393,78 @@ export default function ServiceDetailScreen() {
                                         <Text style={styles.novedadTecnico}>— {novedad.tecnico || 'Técnico'}</Text>
                                     </View>
                                 ))}
+                            </ScrollView>
+                        </View>
+                    </View>
+                </Modal>
+
+                {/* Descripción / Observaciones de la cita Modal */}
+                <Modal
+                    visible={descripcionCitaModal.visible}
+                    animationType="slide"
+                    transparent
+                    onRequestClose={() => setDescripcionCitaModal({ visible: false, descripcion: '', observaciones: '' })}
+                >
+                    <View style={styles.modalOverlay}>
+                        <View style={styles.modalContent}>
+                            <View style={styles.modalHeader}>
+                                <Text style={styles.modalTitle}>Información de la cita</Text>
+                                <TouchableOpacity onPress={() => setDescripcionCitaModal({ visible: false, descripcion: '', observaciones: '' })}>
+                                    <Ionicons name="close" size={24} color="#333" />
+                                </TouchableOpacity>
+                            </View>
+                            <ScrollView style={styles.modalScroll}>
+                                {descripcionCitaModal.descripcion ? (
+                                    <View style={styles.modalTextSection}>
+                                        <Text style={styles.modalLabel}>Descripción:</Text>
+                                        <Text style={styles.modalText}>{descripcionCitaModal.descripcion}</Text>
+                                    </View>
+                                ) : null}
+                                {descripcionCitaModal.observaciones ? (
+                                    <View style={styles.modalTextSection}>
+                                        <Text style={styles.modalLabel}>Observaciones:</Text>
+                                        <Text style={styles.modalText}>{descripcionCitaModal.observaciones}</Text>
+                                    </View>
+                                ) : null}
+                                {!descripcionCitaModal.descripcion && !descripcionCitaModal.observaciones && (
+                                    <Text style={styles.modalText}>Sin información disponible para esta cita.</Text>
+                                )}
+                            </ScrollView>
+                        </View>
+                    </View>
+                </Modal>
+
+                {/* Customer / Instrucciones Modal */}
+                <Modal
+                    visible={partidaInfoModal.visible}
+                    animationType="slide"
+                    transparent
+                    onRequestClose={() => setPartidaInfoModal({ visible: false })}
+                >
+                    <View style={styles.modalOverlay}>
+                        <View style={styles.modalContent}>
+                            <View style={styles.modalHeader}>
+                                <Text style={styles.modalTitle}>Indicaciones de la partida</Text>
+                                <TouchableOpacity onPress={() => setPartidaInfoModal({ visible: false })}>
+                                    <Ionicons name="close" size={24} color="#333" />
+                                </TouchableOpacity>
+                            </View>
+                            <ScrollView style={styles.modalScroll}>
+                                {partidaInfoModal.customer ? (
+                                    <View style={styles.modalTextSection}>
+                                        <Text style={styles.modalLabel}>Customer:</Text>
+                                        <Text style={styles.modalText}>{partidaInfoModal.customer}</Text>
+                                    </View>
+                                ) : null}
+                                {partidaInfoModal.instrucciones ? (
+                                    <View style={styles.modalTextSection}>
+                                        <Text style={styles.modalLabel}>Instrucciones:</Text>
+                                        <Text style={styles.modalText}>{partidaInfoModal.instrucciones}</Text>
+                                    </View>
+                                ) : null}
+                                {!partidaInfoModal.customer && !partidaInfoModal.instrucciones && (
+                                    <Text style={styles.modalText}>No hay información adicional para esta partida.</Text>
+                                )}
                             </ScrollView>
                         </View>
                     </View>
@@ -772,6 +886,48 @@ const styles = StyleSheet.create({
         fontSize: 12,
         color: '#888',
         fontStyle: 'italic',
+    },
+    citaInfoButton: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: '#3498db',
+        padding: 10,
+        borderRadius: 8,
+        marginTop: 12,
+        alignSelf: 'flex-start',
+    },
+    citaInfoText: {
+        color: '#fff',
+        fontSize: 14,
+        fontWeight: '600',
+    },
+    partidaInfoButton: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: '#34495e',
+        padding: 10,
+        borderRadius: 8,
+        marginTop: 12,
+        alignSelf: 'flex-start',
+    },
+    partidaInfoText: {
+        color: '#fff',
+        fontSize: 14,
+        fontWeight: '600',
+    },
+    modalTextSection: {
+        marginBottom: 16,
+    },
+    modalLabel: {
+        fontSize: 14,
+        fontWeight: 'bold',
+        color: '#444',
+        marginBottom: 6,
+    },
+    modalText: {
+        fontSize: 14,
+        color: '#333',
+        lineHeight: 20,
     },
     novedadItemHeader: {
         flexDirection: 'row',

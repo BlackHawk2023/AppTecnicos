@@ -251,6 +251,15 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
             // FASE 3: DOWNLOAD — Descargar datos actualizados del backend
             // ═══════════════════════════════════════════════════════════════
 
+            // 3.0 Actualizar metadata (plantillas, materiales, tipos de cierre)
+            try {
+                console.log('RouteContext: Refreshing metadata (plantillas, materials)...');
+                await syncService.syncMetadata();
+                console.log('RouteContext: Metadata refresh complete.');
+            } catch (metaError) {
+                console.log('RouteContext: Metadata refresh failed (non-critical):', metaError);
+            }
+
             // 3.1 Bajar estado de ruta
             const statusData = await RoutesService.getEstadoRuta();
             const hasRemoteRuta = statusData.tiene_ruta_activa && !!statusData.ruta;

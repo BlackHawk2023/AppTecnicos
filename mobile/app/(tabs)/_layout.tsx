@@ -50,6 +50,16 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
+        name="gestiones"
+        options={{
+          title: 'Mis Gestiones',
+          tabBarLabel: 'Gestiones',
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="clipboard" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
         name="stock"
         options={{
           title: 'Mi Stock',

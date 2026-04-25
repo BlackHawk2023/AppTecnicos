@@ -5,6 +5,16 @@ import * as FileSystem from 'expo-file-system/legacy';
 // Database service reference (will be initialized on first use)
 let databaseService: any = null;
 
+/** Genera UUID v4 para batch_id de sincronización */
+function generateSyncBatchId(): string {
+    const bytes = new Uint8Array(16);
+    for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+}
+
 // Helper function to read image file and convert to base64
 async function readImageAsBase64(imagePath: string | null | undefined): Promise<string | null> {
     if (!imagePath) return null;
@@ -130,6 +140,13 @@ class SyncService {
             }
             if (data.materials) {
                 await databaseService.saveMaterials(data.materials);
+            }
+
+            if (data.plantillas_material && Array.isArray(data.plantillas_material)) {
+                console.log(`[SyncService] plantillas_material recibidas: ${data.plantillas_material.length}`, JSON.stringify(data.plantillas_material.map((p: any) => ({ id: p.id, nombre: p.nombre, ti: p.tipo_incidente, tc: p.tipo_cierre, prod: p.producto, items: p.items?.length }))));
+                await databaseService.savePlantillasMaterial(data.plantillas_material);
+            } else {
+                console.warn('[SyncService] plantillas_material NO vino en la respuesta del servidor o no es array', typeof data.plantillas_material);
             }
 
             if (data.service_order_template) {
@@ -486,9 +503,11 @@ class SyncService {
                 };
             }));
 
-            // Send to backend
+            // Send to backend with batch_id for idempotency
+            const batch_id = generateSyncBatchId();
             const response = await api.post('/mobile/stock/sync-movimientos', {
-                movimientos: movimientos
+                movimientos: movimientos,
+                batch_id: batch_id
             });
 
             if (response.data?.success) {
@@ -589,7 +608,7 @@ class SyncService {
      */
     async solicitarDevolucion(
         almacenDestino: string,
-        items: Array<{ codigo_material: string, serie?: string, cantidad: number }>,
+        items: Array<{ codigo_material: string, serie?: string, cantidad: number, condicion?: string }>,
         comentario?: string
     ): Promise<SyncResult> {
         try {

@@ -132,6 +132,13 @@ class SyncService {
                 await databaseService.saveMaterials(data.materials);
             }
 
+            if (data.plantillas_material && Array.isArray(data.plantillas_material)) {
+                console.log(`[SyncService] plantillas_material recibidas: ${data.plantillas_material.length}`);
+                await databaseService.savePlantillasMaterial(data.plantillas_material);
+            } else {
+                console.warn('[SyncService] plantillas_material no vino en la respuesta o no es array');
+            }
+
             if (data.service_order_template) {
                 await databaseService.saveTemplate('service_order', data.service_order_template);
             }

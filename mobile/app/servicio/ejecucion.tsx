@@ -121,6 +121,8 @@ export default function EjecucionScreen() {
     // Metadata from DB
     const [closureTypes, setClosureTypes] = useState<any[]>([]);
     const [materials, setMaterials] = useState<any[]>([]);
+    const [plantillasMaterial, setPlantillasMaterial] = useState<any[]>([]);
+    const [showPlantillaModal, setShowPlantillaModal] = useState(false);
 
     // Embedded HTML template (with html2canvas for image export)
     const HTML_TEMPLATE = `<!DOCTYPE html>
@@ -384,6 +386,13 @@ export default function EjecucionScreen() {
                 const mats = await db.getMaterials();
                 if (mats && mats.length > 0) {
                     setMaterials(mats);
+                }
+
+                // Load material templates
+                const plantillas = await db.getPlantillasMaterial();
+                console.log(`[Ejecucion] loadInitialData: ${plantillas?.length ?? 0} plantillas cargadas desde DB`, plantillas?.map((p: any) => ({ id: p.id, nombre: p.nombre, items: p.items?.length })));
+                if (plantillas && plantillas.length > 0) {
+                    setPlantillasMaterial(plantillas);
                 }
 
                 // Load technician profile (using direct SQL like perfil.tsx)
@@ -2312,6 +2321,104 @@ export default function EjecucionScreen() {
                 <Text style={[styles.stepTitle, { fontSize: 18 * textScale }]}>Paso 3: Materiales</Text>
                 <Text style={[styles.stepSubtitle, { fontSize: 14 * textScale }]}>Registre los materiales retirados y entregados</Text>
 
+                {/* Plantilla selector */}
+                {(() => {
+                    const currentPartidaInfo = partidas.find(p => p.partida === currentPartida)
+                        || partidas.find(p => String(p.partida) === String(currentPartida));
+                    const norm = (s?: string | null) => (s ?? '').trim().toLowerCase();
+                    if (plantillasMaterial.length > 0) {
+                        console.log(`[Ejecucion] Filtro plantillas: total=${plantillasMaterial.length} | partida=${currentPartida} ti="${currentPartidaInfo?.tipo_incidente}" tc="${formData.tipo_cierre}" prod="${currentPartidaInfo?.producto}"`);
+                        plantillasMaterial.forEach((p: any) => {
+                            const failTi = p.tipo_incidente && norm(p.tipo_incidente) !== norm(currentPartidaInfo?.tipo_incidente);
+                            const failTc = p.tipo_cierre && norm(p.tipo_cierre) !== norm(formData.tipo_cierre);
+                            const failProd = p.producto && norm(p.producto) !== norm(currentPartidaInfo?.producto);
+                            console.log(`  plantilla id=${p.id} "${p.nombre}" ti="${p.tipo_incidente}" tc="${p.tipo_cierre}" prod="${p.producto}" => ${failTi ? 'FALLA_TI' : failTc ? 'FALLA_TC' : failProd ? 'FALLA_PROD' : 'PASA'}`);
+                        });
+                    }
+                    const matching = plantillasMaterial.filter(p => {
+                        if (p.tipo_incidente && norm(p.tipo_incidente) !== norm(currentPartidaInfo?.tipo_incidente)) return false;
+                        if (p.tipo_cierre && norm(p.tipo_cierre) !== norm(formData.tipo_cierre)) return false;
+                        if (p.producto && norm(p.producto) !== norm(currentPartidaInfo?.producto)) return false;
+                        return true;
+                    });
+                    if (matching.length === 0) return null;
+                    return (
+                        <View style={{ marginBottom: 12 }}>
+                            <TouchableOpacity
+                                style={styles.plantillaButton}
+                                onPress={() => setShowPlantillaModal(true)}
+                            >
+                                <Ionicons name="layers-outline" size={18} color="#fff" />
+                                <Text style={styles.plantillaButtonText}>Aplicar Plantilla ({matching.length})</Text>
+                            </TouchableOpacity>
+                            <Modal
+                                visible={showPlantillaModal}
+                                transparent
+                                animationType="fade"
+                                onRequestClose={() => setShowPlantillaModal(false)}
+                            >
+                                <View style={styles.plantillaOverlay}>
+                                    <View style={styles.plantillaContainer}>
+                                        <View style={styles.plantillaHeader}>
+                                            <Text style={styles.plantillaTitle}>Seleccionar Plantilla</Text>
+                                            <TouchableOpacity onPress={() => setShowPlantillaModal(false)}>
+                                                <Ionicons name="close" size={24} color="#333" />
+                                            </TouchableOpacity>
+                                        </View>
+                                        <ScrollView>
+                                            {matching.map((plantilla: any) => {
+                                                const retiroCount = plantilla.items?.filter((it: any) => it.tipo === 'RETIRO').length || 0;
+                                                const entregaCount = plantilla.items?.filter((it: any) => it.tipo === 'ENTREGA').length || 0;
+                                                return (
+                                                    <TouchableOpacity
+                                                        key={plantilla.id}
+                                                        style={styles.plantillaItem}
+                                                        onPress={() => {
+                                                            const retirados: MaterialItem[] = (plantilla.items || [])
+                                                                .filter((it: any) => it.tipo === 'RETIRO')
+                                                                .map((it: any) => ({
+                                                                    id: `plantilla-ret-${it.id}-${Date.now()}`,
+                                                                    material: it.codigo_material || '',
+                                                                    nombre_material: it.nombre_material || it.codigo_material || '',
+                                                                    serie_o_cantidad: it.unidad_medida === 'SERIALIZADO' ? '' : (it.cantidad ? String(it.cantidad) : '1'),
+                                                                    condicion: 'BUENO',
+                                                                    unidad_medida: it.unidad_medida || 'UNIDAD',
+                                                                }));
+                                                            const entregados: MaterialItem[] = (plantilla.items || [])
+                                                                .filter((it: any) => it.tipo === 'ENTREGA')
+                                                                .map((it: any) => ({
+                                                                    id: `plantilla-ent-${it.id}-${Date.now()}`,
+                                                                    material: it.codigo_material || '',
+                                                                    nombre_material: it.nombre_material || it.codigo_material || '',
+                                                                    serie_o_cantidad: it.unidad_medida === 'SERIALIZADO' ? '' : (it.cantidad ? String(it.cantidad) : '1'),
+                                                                    condicion: 'NUEVO',
+                                                                    unidad_medida: it.unidad_medida || 'UNIDAD',
+                                                                }));
+                                                            setFormData(prev => ({
+                                                                ...prev,
+                                                                material_retirado: retirados,
+                                                                material_entregado: entregados,
+                                                            }));
+                                                            setShowPlantillaModal(false);
+                                                        }}
+                                                    >
+                                                        <Text style={styles.plantillaItemName}>{plantilla.nombre}</Text>
+                                                        <Text style={styles.plantillaItemMeta}>
+                                                            {retiroCount > 0 ? `↑ ${retiroCount} retiro${retiroCount > 1 ? 's' : ''}` : ''}
+                                                            {retiroCount > 0 && entregaCount > 0 ? '  ' : ''}
+                                                            {entregaCount > 0 ? `↓ ${entregaCount} entrega${entregaCount > 1 ? 's' : ''}` : ''}
+                                                        </Text>
+                                                    </TouchableOpacity>
+                                                );
+                                            })}
+                                        </ScrollView>
+                                    </View>
+                                </View>
+                            </Modal>
+                        </View>
+                    );
+                })()}
+
                 {renderMaterialSection('retirado', formData.material_retirado)}
                 {renderMaterialSection('entregado', formData.material_entregado)}
                 {renderMaterialPickerModal()}
@@ -2874,4 +2981,14 @@ const styles = StyleSheet.create({
     orderPhotoFinishButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#27ae60', padding: 16, borderRadius: 10 },
     orderPhotoNextButtonDisabled: { backgroundColor: '#444' },
     orderPhotoNextButtonText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
+    // Plantilla de materiales
+    plantillaButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#8e44ad', padding: 12, borderRadius: 10, marginBottom: 4 },
+    plantillaButtonText: { color: '#fff', fontWeight: 'bold', fontSize: 14 },
+    plantillaOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'center', alignItems: 'center', padding: 20 },
+    plantillaContainer: { backgroundColor: '#1e1e2e', borderRadius: 12, width: '100%', maxHeight: '70%', overflow: 'hidden' },
+    plantillaHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 16, borderBottomWidth: 1, borderBottomColor: '#333' },
+    plantillaTitle: { fontSize: 16, fontWeight: 'bold', color: '#fff' },
+    plantillaItem: { padding: 16, borderBottomWidth: 1, borderBottomColor: '#2a2a3a' },
+    plantillaItemName: { color: '#fff', fontSize: 15, fontWeight: '600' },
+    plantillaItemMeta: { color: '#888', fontSize: 12, marginTop: 4 },
 });

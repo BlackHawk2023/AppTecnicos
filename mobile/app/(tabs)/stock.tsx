@@ -145,7 +145,7 @@ export default function StockScreen() {
     const initializeReturnSelection = () => {
         const initial: Record<string, { selected: boolean, cantidad: number }> = {};
         stockItems.forEach(item => {
-            const key = `${item.codigo_material}-${item.serie || 'no-serie'}`;
+            const key = `${item.codigo_material}-${item.serie || 'no-serie'}-${item.condicion || 'BUENO'}`;
             initial[key] = {
                 selected: false,
                 cantidad: item.cantidad
@@ -408,15 +408,16 @@ export default function StockScreen() {
         // Build items from selection
         const itemsToReturn = stockItems
             .filter(item => {
-                const key = `${item.codigo_material}-${item.serie || 'no-serie'}`;
+                const key = `${item.codigo_material}-${item.serie || 'no-serie'}-${item.condicion || 'BUENO'}`;
                 return returnSelection[key]?.selected && returnSelection[key]?.cantidad > 0;
             })
             .map(item => {
-                const key = `${item.codigo_material}-${item.serie || 'no-serie'}`;
+                const key = `${item.codigo_material}-${item.serie || 'no-serie'}-${item.condicion || 'BUENO'}`;
                 return {
                     codigo_material: item.codigo_material,
                     serie: item.serie || undefined,
-                    cantidad: returnSelection[key]?.cantidad || 0
+                    cantidad: returnSelection[key]?.cantidad || 0,
+                    condicion: item.condicion || 'BUENO'
                 };
             });
 
@@ -1168,12 +1169,12 @@ export default function StockScreen() {
                                     (item.serie && item.serie.toUpperCase().includes(q))
                                 );
                             }).map((item, index) => {
-                                const key = `${item.codigo_material}-${item.serie || 'no-serie'}`;
+                                const key = `${item.codigo_material}-${item.serie || 'no-serie'}-${item.condicion || 'BUENO'}`;
                                 const selection = returnSelection[key];
                                 const isSerializado = item.unidad_medida === 'SERIALIZADO';
                                 return (
                                     <TouchableOpacity
-                                        key={index}
+                                        key={key}
                                         style={[
                                             styles.modalItem,
                                             selection?.selected && styles.modalItemSelected
@@ -1198,6 +1199,18 @@ export default function StockScreen() {
                                             {item.serie && (
                                                 <Text style={styles.modalItemSerie}>Serie: {item.serie}</Text>
                                             )}
+                                            <View style={{ flexDirection: 'row', marginTop: 3 }}>
+                                                <View style={{
+                                                    backgroundColor: getConditionColor(item.condicion || 'BUENO'),
+                                                    paddingHorizontal: 6,
+                                                    paddingVertical: 1,
+                                                    borderRadius: 4
+                                                }}>
+                                                    <Text style={{ color: 'white', fontSize: 10, fontWeight: 'bold' }}>
+                                                        {item.condicion || 'BUENO'}
+                                                    </Text>
+                                                </View>
+                                            </View>
                                         </View>
 
                                         {!isSerializado && selection?.selected ? (

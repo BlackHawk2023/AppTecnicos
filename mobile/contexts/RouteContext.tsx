@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import { Alert } from 'react-native';
 import { RoutesService, RutaResumen, RutaDetalle } from '../services/routes.service';
 import { useAuth } from './AuthContext';
@@ -76,6 +76,7 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
     const [hasRoute, setHasRoute] = useState(false);
+    const isSyncingRef = useRef(false);
     const [generatedOrders, setGeneratedOrders] = useState<Map<string, GeneratedOrder>>(new Map());
     const [reportedNovedades, setReportedNovedades] = useState<Map<string, ReportedNovedad>>(new Map());
 
@@ -156,13 +157,37 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
         }
     }, [user]);
 
+    const cleanupRouteData = async (db: any) => {
+        await db.clearRutaActiva();
+        await db.clearAllGestiones();
+
+        if (typeof db.clearPendingImageUploads === 'function') {
+            await db.clearPendingImageUploads();
+        }
+
+        try {
+            const FileSystem = await import('expo-file-system');
+            const ordenesDir = `${FileSystem.documentDirectory}ordenes/`;
+            const dirInfo = await FileSystem.getInfoAsync(ordenesDir);
+            if (dirInfo.exists) {
+                await FileSystem.deleteAsync(ordenesDir, { idempotent: true });
+            }
+        } catch (cleanupErr) {
+            console.warn('RouteContext: Error cleaning image files:', cleanupErr);
+        }
+    };
+
     // Sync with backend - called by pull-to-refresh (manual sync)
     // Unified sync logic for both Home and Stock screens
     // correct order: Upload (Movements -> Gestiones -> Locations) -> Finalize -> Download -> Cleanup
     const syncWithBackend = useCallback(async () => {
         console.log('RouteContext: syncWithBackend called (manual sync)');
         if (!user) return;
-
+        if (isSyncingRef.current) {
+            console.log('RouteContext: Sync already in progress, skipping duplicate call');
+            return;
+        }
+        isSyncingRef.current = true;
         setRefreshing(true);
 
         // Track sync results for feedback
@@ -249,8 +274,7 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
                     console.log('RouteContext: Backend finalization successful.');
 
                     // Now we can safely clear local data
-                    await db.clearRutaActiva();
-                    await db.clearGestionesNotInRuta(null);
+                    await cleanupRouteData(db);
 
                     // Update state to null so the rest of the function sees "No Route"
                     // and fetches the new status correctly
@@ -284,10 +308,7 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
             // SCENARIO 1: Old route active -> New route from backend (Different ID)
             if (rutaActiva && hasRemoteRuta && statusData.ruta && statusData.ruta.id !== rutaActiva.id) {
                 console.log('RouteContext: Route changed! Clearing old, setting new.');
-                await db.clearRutaActiva();
-                // Don't save yet - wait for details
-                // Also clear gestiones from old route
-                await db.clearGestionesNotInRuta(statusData.ruta.id);
+                await cleanupRouteData(db);
                 newRuta = statusData.ruta;
             }
             // SCENARIO 2: Same route active -> Update details
@@ -319,12 +340,7 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
                         'Ruta cancelada',
                         'La ruta ha sido cerrada o cancelada desde la central.'
                     );
-                    await db.clearRutaActiva();
-                    await db.clearGestionesNotInRuta(null);
-                    if (typeof db.clearSyncedGestiones === 'function') {
-                        await db.clearSyncedGestiones();
-                        console.log('RouteContext: Cleaned synced gestiones on route cancellation');
-                    }
+                    await cleanupRouteData(db);
                     setRutaActiva(null);
                     setServicios([]);
                     setHasRoute(false);
@@ -333,12 +349,7 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
                     // But if we are here, it means we might have missed the transition.
                     // Just clear it.
                     console.log('RouteContext: Cleaning up finalized route.');
-                    await db.clearRutaActiva();
-                    await db.clearGestionesNotInRuta(null);
-                    if (typeof db.clearSyncedGestiones === 'function') {
-                        await db.clearSyncedGestiones();
-                        console.log('RouteContext: Cleaned synced gestiones for finalized route');
-                    }
+                    await cleanupRouteData(db);
                     setRutaActiva(null);
                     setServicios([]);
                     setHasRoute(false);
@@ -378,6 +389,17 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
             // Stop tracking since we're done with the potential route change logic/tracking
             if (!hasRemoteRuta) {
                 locationService.stopTracking();
+            }
+
+            // 3.0 Actualizar metadata (plantillas, materiales, tipos de cierre)
+            // Se hace en cada sync para reflejar cambios administrativos sin necesidad de re-login
+            try {
+                console.log('RouteContext: Refreshing metadata (plantillas, materials)...');
+                await syncService.syncMetadata();
+                console.log('RouteContext: Metadata refresh complete.');
+            } catch (metaError) {
+                console.log('RouteContext: Metadata refresh failed (non-critical):', metaError);
+                // Non-critical — metadata from previous sync remains valid
             }
 
             // 3.2 Bajar stock actualizado
@@ -475,6 +497,7 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
             Alert.alert('Error de sincronización', 'No se pudo conectar al servidor. Los datos locales se mantienen.');
             // Don't clear local data on sync failure - keep working offline
         } finally {
+            isSyncingRef.current = false;
             setRefreshing(false);
         }
     }, [user, rutaActiva]);

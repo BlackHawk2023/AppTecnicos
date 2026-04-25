@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
     View,
     Text,
@@ -51,6 +51,7 @@ export default function NovedadScreen() {
     const [location, setLocation] = useState<Location.LocationObject | null>(null);
     const [locationError, setLocationError] = useState<string | null>(null);
     const [isEditing, setIsEditing] = useState(false);
+    const isSavingRef = useRef(false);
 
     // Load partidas for this OT
     useEffect(() => {
@@ -168,6 +169,7 @@ export default function NovedadScreen() {
     };
 
     const handleSave = async () => {
+        if (isSavingRef.current) return;
         if (selectedPartidas.size === 0) {
             Alert.alert('Falta información', 'Por favor seleccione al menos una partida.');
             return;
@@ -191,6 +193,7 @@ export default function NovedadScreen() {
             return;
         }
 
+        isSavingRef.current = true;
         setLoading(true);
         try {
             const db = await loadDatabaseService();
@@ -235,6 +238,7 @@ export default function NovedadScreen() {
             console.error(error);
             Alert.alert('Error', 'Hubo un problema al guardar la novedad.');
         } finally {
+            isSavingRef.current = false;
             setLoading(false);
         }
     };

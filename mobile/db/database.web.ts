@@ -21,6 +21,10 @@ export interface DatabaseService {
     hasPendingGestiones(): Promise<boolean>;
     clearSyncedGestiones(): Promise<number>;
     clearAllGestiones(): Promise<number>;
+    clearPendingImageUploads(): Promise<void>;
+    // Plantillas de materiales
+    savePlantillasMaterial(plantillas: any[]): Promise<void>;
+    getPlantillasMaterial(tipo_incidente?: string, tipo_cierre?: string): Promise<any[]>;
 }
 
 // Web stub implementation - all methods are no-ops
@@ -75,12 +79,21 @@ class WebDatabaseStub implements DatabaseService {
         console.log('Database: Web - clearAllGestiones skipped');
         return 0;
     }
+    async clearPendingImageUploads(): Promise<void> {
+        console.log('Database: Web - clearPendingImageUploads skipped');
+    }
     async getGestionesByRuta(_rutaId: number): Promise<GestionRecord[]> {
         return [];
     }
     async clearGestionesNotInRuta(_currentRutaId: number | null): Promise<number> {
         console.log('Database: Web - clearGestionesNotInRuta skipped');
         return 0;
+    }
+    async savePlantillasMaterial(_plantillas: any[]): Promise<void> {
+        console.log('Database: Web - savePlantillasMaterial skipped');
+    }
+    async getPlantillasMaterial(_tipo_incidente?: string, _tipo_cierre?: string): Promise<any[]> {
+        return [];
     }
 }
 

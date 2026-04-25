@@ -4,6 +4,16 @@ import * as SQLite from 'expo-sqlite';
 
 const DB_NAME = 'stdiscar.db';
 
+/** UUID v4 generator sin dependencias externas */
+function generateUUID(): string {
+    const bytes = new Uint8Array(16);
+    for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 1
+    const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+}
+
 export interface DatabaseService {
     init(): Promise<void>;
     getDb(): Promise<any>;
@@ -24,6 +34,7 @@ export interface DatabaseService {
     clearSyncedGestiones(): Promise<number>;
     clearAllGestiones(): Promise<number>;
     clearGestionesNotInRuta(currentRutaId: number | null): Promise<number>;
+    clearPendingImageUploads(): Promise<void>;
     // Pending image uploads queue
     addPendingImageUpload(gestionLocalId: number, gestionServerId: number, imagePath: string, imageType: string): Promise<number>;
     getPendingImageUploads(): Promise<PendingImageUpload[]>;
@@ -59,6 +70,9 @@ export interface DatabaseService {
     saveAppNotificaciones(items: AppNotificacion[]): Promise<void>;
     getAppNotificaciones(): Promise<AppNotificacion[]>;
     clearAppNotificaciones(): Promise<void>;
+    // Plantillas de materiales
+    savePlantillasMaterial(plantillas: any[]): Promise<void>;
+    getPlantillasMaterial(tipo_incidente?: string, tipo_cierre?: string): Promise<any[]>;
 }
 
 // Type for saving a new gestion
@@ -125,6 +139,7 @@ export interface StockLocalItem {
 // Type for pending movement to sync
 export interface MovimientoPendiente {
     id?: number;
+    uuid?: string;  // UUID único para deduplicación
     codigo_material: string;
     serie: string | null;
     cantidad: number;
@@ -412,6 +427,7 @@ class DatabaseServiceImpl implements DatabaseService {
         await db.execAsync(`
             CREATE TABLE IF NOT EXISTS movimientos_pendientes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                uuid TEXT,
                 codigo_material TEXT NOT NULL,
                 serie TEXT,
                 cantidad INTEGER DEFAULT 1,
@@ -429,6 +445,13 @@ class DatabaseServiceImpl implements DatabaseService {
         // Migration: Add condicion column to existing movimientos_pendientes tables
         try {
             await db.execAsync(`ALTER TABLE movimientos_pendientes ADD COLUMN condicion TEXT`);
+        } catch (e) {
+            // Column already exists - expected on new installs
+        }
+
+        // Migration: Add uuid column to existing movimientos_pendientes tables
+        try {
+            await db.execAsync(`ALTER TABLE movimientos_pendientes ADD COLUMN uuid TEXT`);
         } catch (e) {
             // Column already exists - expected on new installs
         }
@@ -537,6 +560,42 @@ class DatabaseServiceImpl implements DatabaseService {
                 cached_at INTEGER
             );
         `);
+
+        // ==================== PLANTILLAS DE MATERIALES ====================
+        await db.execAsync(`
+            CREATE TABLE IF NOT EXISTS plantillas_material (
+                id INTEGER PRIMARY KEY,
+                nombre TEXT NOT NULL,
+                tipo_incidente TEXT,
+                tipo_cierre TEXT,
+                producto TEXT
+            );
+        `);
+        await db.execAsync(`
+            CREATE TABLE IF NOT EXISTS plantillas_material_items (
+                id INTEGER PRIMARY KEY,
+                plantilla_id INTEGER NOT NULL,
+                tipo TEXT NOT NULL,
+                codigo_material TEXT,
+                nombre_material TEXT,
+                unidad_medida TEXT,
+                cantidad INTEGER,
+                orden INTEGER DEFAULT 0
+            );
+        `);
+        await db.execAsync(`
+            CREATE INDEX IF NOT EXISTS idx_plantillas_items_plantilla
+            ON plantillas_material_items(plantilla_id);
+        `);
+        // Schema migration guards: add columns that may be missing in older builds
+        try {
+            await db.execAsync(`ALTER TABLE plantillas_material_items ADD COLUMN nombre_material TEXT`);
+            console.log('Database: Added nombre_material column to plantillas_material_items');
+        } catch (e) { /* column already exists */ }
+        try {
+            await db.execAsync(`ALTER TABLE plantillas_material_items ADD COLUMN unidad_medida TEXT`);
+            console.log('Database: Added unidad_medida column to plantillas_material_items');
+        } catch (e) { /* column already exists */ }
 
         console.log('Database initialized and tables verified.');
     }
@@ -702,6 +761,12 @@ class DatabaseServiceImpl implements DatabaseService {
         const result = await db.runAsync("DELETE FROM gestiones");
         console.log(`DatabaseService: Cleared ALL ${result.changes} gestiones`);
         return result.changes;
+    }
+
+    async clearPendingImageUploads(): Promise<void> {
+        const db = await this.getDb();
+        await db.runAsync('DELETE FROM pending_image_uploads');
+        console.log('DatabaseService: Cleared pending image uploads');
     }
 
     async getGestionesByRuta(rutaId: number): Promise<GestionRecord[]> {
@@ -980,12 +1045,14 @@ class DatabaseServiceImpl implements DatabaseService {
 
     async addMovimientoPendiente(mov: MovimientoPendiente): Promise<number> {
         const db = await this.getDb();
+        // Generar UUID para deduplicación
+        const uuid = mov.uuid || generateUUID();
         const result = await db.runAsync(
-            `INSERT INTO movimientos_pendientes (codigo_material, serie, cantidad, tipo_movimiento, condicion, cita, ot, partida, foto_serie, fecha_hora, synced) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
-            [mov.codigo_material, mov.serie, mov.cantidad, mov.tipo_movimiento, mov.condicion || null, mov.cita, mov.ot, mov.partida, mov.foto_serie || null, mov.fecha_hora]
+            `INSERT INTO movimientos_pendientes (uuid, codigo_material, serie, cantidad, tipo_movimiento, condicion, cita, ot, partida, foto_serie, fecha_hora, synced) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+            [uuid, mov.codigo_material, mov.serie, mov.cantidad, mov.tipo_movimiento, mov.condicion || null, mov.cita, mov.ot, mov.partida, mov.foto_serie || null, mov.fecha_hora]
         );
-        console.log(`DatabaseService: Added pending movement ${mov.tipo_movimiento} for ${mov.codigo_material}`);
+        console.log(`DatabaseService: Added pending movement ${mov.tipo_movimiento} for ${mov.codigo_material} (uuid: ${uuid})`);
         return result.lastInsertRowId;
     }
 
@@ -1254,6 +1321,58 @@ class DatabaseServiceImpl implements DatabaseService {
     async clearAppNotificaciones(): Promise<void> {
         const db = await this.getDb();
         await db.runAsync('DELETE FROM app_notificaciones');
+    }
+
+    async savePlantillasMaterial(plantillas: any[]): Promise<void> {
+        const db = await this.getDb();
+        await db.runAsync('DELETE FROM plantillas_material_items');
+        await db.runAsync('DELETE FROM plantillas_material');
+        console.log(`DatabaseService: Saving ${plantillas.length} plantillas_material to SQLite`);
+        let savedCount = 0;
+        for (const p of plantillas) {
+            try {
+                await db.runAsync(
+                    'INSERT INTO plantillas_material (id, nombre, tipo_incidente, tipo_cierre, producto) VALUES (?, ?, ?, ?, ?)',
+                    [p.id, p.nombre, p.tipo_incidente ?? null, p.tipo_cierre ?? null, p.producto ?? null]
+                );
+                let itemCount = 0;
+                for (const it of (p.items || [])) {
+                    await db.runAsync(
+                        'INSERT INTO plantillas_material_items (id, plantilla_id, tipo, codigo_material, nombre_material, unidad_medida, cantidad, orden) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                        [it.id, p.id, it.tipo, it.codigo_material ?? null, it.nombre_material ?? null, it.unidad_medida ?? null, it.cantidad ?? null, it.orden ?? 0]
+                    );
+                    itemCount++;
+                }
+                console.log(`DatabaseService: Saved plantilla id=${p.id} "${p.nombre}" with ${itemCount} items`);
+                savedCount++;
+            } catch (e) {
+                console.error(`DatabaseService: ERROR saving plantilla id=${p.id} "${p.nombre}": ${e}`);
+            }
+        }
+        console.log(`DatabaseService: Done — ${savedCount}/${plantillas.length} plantillas saved`);
+    }
+
+    async getPlantillasMaterial(tipo_incidente?: string, tipo_cierre?: string): Promise<any[]> {
+        const db = await this.getDb();
+        let query = `SELECT * FROM plantillas_material WHERE 1=1`;
+        const params: any[] = [];
+        if (tipo_incidente) {
+            query += ` AND (tipo_incidente = ? OR tipo_incidente IS NULL)`;
+            params.push(tipo_incidente);
+        }
+        if (tipo_cierre) {
+            query += ` AND (tipo_cierre = ? OR tipo_cierre IS NULL)`;
+            params.push(tipo_cierre);
+        }
+        const plantillas: any[] = await db.getAllAsync(query, params);
+        console.log(`[DB] getPlantillasMaterial => ${plantillas.length} plantillas en SQLite`, plantillas.map(p => ({ id: p.id, nombre: p.nombre, ti: p.tipo_incidente, tc: p.tipo_cierre, prod: p.producto })));
+        for (const p of plantillas) {
+            p.items = await db.getAllAsync(
+                'SELECT * FROM plantillas_material_items WHERE plantilla_id = ? ORDER BY tipo, orden',
+                [p.id]
+            );
+        }
+        return plantillas;
     }
 }
 
