@@ -24,6 +24,7 @@ interface GestionGroup {
   resumen: {
     ordenes: number;
     novedades: number;
+    stocks: number;
     conFoto: number;
     pendientes: number;
     sincronizadas: number;
@@ -69,6 +70,7 @@ const GestionesScreen = () => {
           resumen: {
             ordenes: 0,
             novedades: 0,
+            stocks: 0,
             conFoto: 0,
             pendientes: 0,
             sincronizadas: 0,
@@ -81,6 +83,8 @@ const GestionesScreen = () => {
 
       if (gestion.tipo === 'ORDEN') {
         group.resumen.ordenes += 1;
+      } else if (gestion.tipo === 'STOCK') {
+        group.resumen.stocks += 1;
       } else {
         group.resumen.novedades += 1;
       }
@@ -192,9 +196,14 @@ const GestionesScreen = () => {
                 <View style={[styles.badge, styles.badgeSecondary, styles.badgeMargin]}>
                   <Text style={styles.badgeLabel}>{group.resumen.ordenes} órdenes</Text>
                 </View>
-                <View style={[styles.badge, styles.badgeWarning]}>
+                <View style={[styles.badge, styles.badgeWarning, styles.badgeMargin]}>
                   <Text style={styles.badgeLabel}>{group.resumen.novedades} novedades</Text>
                 </View>
+                {group.resumen.stocks > 0 && (
+                  <View style={[styles.badge, styles.badgeStock]}>
+                    <Text style={styles.badgeLabel}>{group.resumen.stocks} stocks</Text>
+                  </View>
+                )}
               </View>
             </View>
           );
@@ -207,9 +216,9 @@ const GestionesScreen = () => {
               <View style={styles.itemLeft}>
                 <View style={styles.iconContainer}>
                   <Ionicons
-                    name={item.tipo === 'ORDEN' ? 'document-text' : 'alert-circle'}
+                    name={item.tipo === 'STOCK' ? 'layers' : item.tipo === 'ORDEN' ? 'document-text' : 'alert-circle'}
                     size={20}
-                    color={item.tipo === 'ORDEN' ? '#2ecc71' : '#f39c12'}
+                    color={item.tipo === 'STOCK' ? '#2980b9' : item.tipo === 'ORDEN' ? '#2ecc71' : '#f39c12'}
                   />
                 </View>
               </View>
@@ -218,7 +227,7 @@ const GestionesScreen = () => {
                   <Text style={styles.itemTitle}>OT {item.ot} · P.{item.partida}</Text>
                   <Text style={styles.itemTime}>{formatTime(item.timestamp)}</Text>
                 </View>
-                <Text style={styles.itemSubtitle}>{item.tipo === 'ORDEN' ? 'Orden cargada' : 'Novedad reportada'}</Text>
+                <Text style={styles.itemSubtitle}>{item.tipo === 'STOCK' ? 'Stock aplicado' : item.tipo === 'ORDEN' ? 'Orden cargada' : 'Novedad reportada'}</Text>
                 <View style={styles.statusRow}>
                   {hasPhoto ? (
                     <View style={[styles.photoBadge, styles.badgeMargin]}>
@@ -390,6 +399,9 @@ const styles = StyleSheet.create({
   },
   badgeWarning: {
     backgroundColor: '#2d2e2f',
+  },
+  badgeStock: {
+    backgroundColor: '#1a3a4a',
   },
   badgeLabel: {
     color: '#fff',

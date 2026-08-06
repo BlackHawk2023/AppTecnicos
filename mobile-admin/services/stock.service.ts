@@ -55,6 +55,8 @@ export interface Ubicacion {
   tipo: string;                   // 'FIJA' | 'TECNICO' | 'DEPOSITO'
   tecnico_id: string | null;
   tecnico_nombre: string | null;
+  codigo_base: string | null;     // Base/almacén al que pertenece la ubicación
+  zona: string | null;
   activo: boolean;
 }
 

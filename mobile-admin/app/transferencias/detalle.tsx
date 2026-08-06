@@ -1,6 +1,10 @@
 /**
  * Pantalla de Detalle de Transferencia
  * Muestra los detalles de una transferencia y permite aceptar/rechazar/cancelar
+ * Cuando la transferencia estÃ¡ PENDIENTE y el destino es el encargado:
+ *   - Buscador + scanner para filtrar items
+ *   - VerificaciÃ³n individual por item (serializado = check, no-serializado = cantidad)
+ *   - BotÃ³n Aceptar habilitado una vez que al menos un item fue verificado
  */
 import React, { useState, useEffect } from 'react';
 import {
@@ -8,10 +12,15 @@ import {
   Text,
   StyleSheet,
   ScrollView,
+  TextInput,
   TouchableOpacity,
   Alert,
   ActivityIndicator,
+  Modal,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
+import { CameraView, useCameraPermissions } from 'expo-camera';
 import { router, useLocalSearchParams } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '../../contexts/AuthContext';
@@ -33,6 +42,16 @@ export default function DetalleTransferenciaScreen() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [transferencia, setTransferencia] = useState<Transferencia | null>(null);
 
+  // VerificaciÃ³n de items (item_id â†’ cantidad aceptada)
+  const [verificados, setVerificados] = useState<Record<number, number>>({});
+  const [searchVerif, setSearchVerif] = useState('');
+  const [isScanning, setIsScanning] = useState(false);
+  const [permission, requestPermission] = useCameraPermissions();
+
+  // Modal de cantidad para items no serializados
+  const [cantidadModal, setCantidadModal] = useState<{ visible: boolean; item: TransferenciaItem | null }>({ visible: false, item: null });
+  const [cantidadInput, setCantidadInput] = useState('');
+
   useEffect(() => {
     loadTransferencia();
   }, [transferenciaId]);
@@ -41,6 +60,7 @@ export default function DetalleTransferenciaScreen() {
     try {
       const data = await getTransferencia(transferenciaId);
       setTransferencia(data);
+      setVerificados({});
     } catch (error) {
       console.error('Error cargando transferencia:', error);
       Alert.alert('Error', 'No se pudo cargar la transferencia');
@@ -50,7 +70,6 @@ export default function DetalleTransferenciaScreen() {
     }
   };
 
-  // Obtener color del estado
   const getEstadoColor = (estado: string) => {
     switch (estado) {
       case 'PENDIENTE': return Colors.warning;
@@ -61,7 +80,6 @@ export default function DetalleTransferenciaScreen() {
     }
   };
 
-  // Formatear fecha
   const formatDate = (dateString: string) => {
     return new Date(dateString).toLocaleDateString('es-AR', {
       day: '2-digit',
@@ -72,28 +90,89 @@ export default function DetalleTransferenciaScreen() {
     });
   };
 
-  // Verificar si el usuario puede responder (si es el destino y está pendiente)
   const puedeResponder = () => {
-    if (!transferencia || transferencia.estado !== 'PENDIENTE') return false;
-    // El encargado puede responder si el destino coincide con su base
-    return transferencia.destino_ubicacion === codigoBase ||
-      transferencia.destino_almacen_id === codigoBase;
+    return !!(transferencia && transferencia.estado === 'PENDIENTE');
   };
 
-  // Verificar si el usuario puede cancelar (si es el origen y está pendiente)
   const puedeCancelar = () => {
-    if (!transferencia || transferencia.estado !== 'PENDIENTE') return false;
-    return transferencia.origen_ubicacion === codigoBase ||
-      transferencia.origen_almacen_id === codigoBase;
+    return !!(transferencia && transferencia.estado === 'PENDIENTE');
   };
 
-  // Aceptar transferencia
+  // â”€â”€â”€ Scanner â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const startScanning = async () => {
+    if (!permission?.granted) {
+      const { granted } = await requestPermission();
+      if (!granted) {
+        Alert.alert('Permiso denegado', 'Se necesita acceso a la cámara para escanear.');
+        return;
+      }
+    }
+    setIsScanning(true);
+  };
+
+  const handleBarCodeScanned = ({ data }: { type: string; data: string }) => {
+    setIsScanning(false);
+    setSearchVerif(data);
+  };
+
+  // â”€â”€â”€ VerificaciÃ³n de items â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const handleVerificarItem = (item: TransferenciaItem) => {
+    const esSeriado = !!item.serie;
+
+    if (esSeriado) {
+      // Toggle simple
+      setVerificados(prev => {
+        const next = { ...prev };
+        if (next[item.id]) {
+          delete next[item.id];
+        } else {
+          next[item.id] = 1;
+        }
+        return next;
+      });
+    } else {
+      // Abrir modal de cantidad
+      setCantidadInput(item.cantidad_solicitada.toString());
+      setCantidadModal({ visible: true, item });
+    }
+  };
+
+  const confirmarCantidad = () => {
+    const item = cantidadModal.item;
+    if (!item) return;
+    const cant = parseInt(cantidadInput, 10);
+    if (isNaN(cant) || cant <= 0) {
+      Alert.alert('Cantidad inválida', 'Ingrese un número mayor a 0');
+      return;
+    }
+    if (cant > item.cantidad_solicitada) {
+      Alert.alert('Cantidad excedida', `No puede superar la cantidad solicitada (${item.cantidad_solicitada})`);
+      return;
+    }
+    setVerificados(prev => ({ ...prev, [item.id]: cant }));
+    setCantidadModal({ visible: false, item: null });
+  };
+
+  const quitarVerificacion = (item: TransferenciaItem) => {
+    setVerificados(prev => {
+      const next = { ...prev };
+      delete next[item.id];
+      return next;
+    });
+  };
+
+  // â”€â”€â”€ Aceptar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const handleAceptar = async () => {
     if (!transferencia) return;
+    const itemsVerificados = Object.entries(verificados).map(([id, cantidad]) => ({
+      item_id: Number(id),
+      aceptar: true,
+      cantidad_aceptada: Number(cantidad),
+    }));
 
     Alert.alert(
       'Aceptar Transferencia',
-      '¿Está seguro de aceptar esta transferencia?',
+      `Se aceptarán ${itemsVerificados.length} item(s) verificado(s). ¿Confirmar?`,
       [
         { text: 'Cancelar', style: 'cancel' },
         {
@@ -102,7 +181,8 @@ export default function DetalleTransferenciaScreen() {
             setIsProcessing(true);
             try {
               await responderTransferencia(transferencia.id, {
-                accion: 'aceptar',
+                accion: 'ACEPTAR',
+                items: itemsVerificados,
               });
               Alert.alert('Éxito', 'Transferencia aceptada correctamente');
               loadTransferencia();
@@ -118,10 +198,9 @@ export default function DetalleTransferenciaScreen() {
     );
   };
 
-  // Rechazar transferencia
+  // â”€â”€â”€ Rechazar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const handleRechazar = async () => {
     if (!transferencia) return;
-
     Alert.alert(
       'Rechazar Transferencia',
       '¿Está seguro de rechazar esta transferencia?',
@@ -133,9 +212,7 @@ export default function DetalleTransferenciaScreen() {
           onPress: async () => {
             setIsProcessing(true);
             try {
-              await responderTransferencia(transferencia.id, {
-                accion: 'rechazar',
-              });
+              await responderTransferencia(transferencia.id, { accion: 'RECHAZAR' });
               Alert.alert('Éxito', 'Transferencia rechazada');
               loadTransferencia();
             } catch (error: any) {
@@ -150,10 +227,9 @@ export default function DetalleTransferenciaScreen() {
     );
   };
 
-  // Cancelar transferencia
+  // â”€â”€â”€ Cancelar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const handleCancelar = async () => {
     if (!transferencia) return;
-
     Alert.alert(
       'Cancelar Transferencia',
       '¿Está seguro de cancelar esta transferencia?',
@@ -180,7 +256,51 @@ export default function DetalleTransferenciaScreen() {
     );
   };
 
-  // Renderizar item de transferencia
+  // â”€â”€â”€ Render item (modo verificaciÃ³n) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const renderItemVerificacion = (item: TransferenciaItem, index: number) => {
+    const esSeriado = !!item.serie;
+    const verificado = verificados[item.id] !== undefined;
+    const cantAceptada = verificados[item.id];
+
+    return (
+      <View key={item.id || index} style={[styles.itemCard, verificado && styles.itemCardVerificado]}>
+        <View style={styles.itemHeader}>
+          <Text style={styles.itemCodigo}>{item.codigo_material}</Text>
+          {verificado ? (
+            <TouchableOpacity onPress={() => quitarVerificacion(item)} style={styles.checkBadge}>
+              <Text style={styles.checkBadgeText}>✓ {esSeriado ? 'OK' : cantAceptada}</Text>
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity
+              style={styles.verificarBtn}
+              onPress={() => handleVerificarItem(item)}
+            >
+              <Text style={styles.verificarBtnText}>{esSeriado ? 'Confirmar' : 'Verificar'}</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+
+        {item.nombre_material && (
+          <Text style={styles.itemDescripcion}>{item.nombre_material}</Text>
+        )}
+
+        <View style={styles.itemDetails}>
+          <View style={styles.itemDetail}>
+            <Text style={styles.itemDetailLabel}>Solicitado:</Text>
+            <Text style={styles.itemDetailValue}>{item.cantidad_solicitada}</Text>
+          </View>
+          {item.serie && (
+            <View style={styles.itemDetail}>
+              <Text style={styles.itemDetailLabel}>Serie:</Text>
+              <Text style={styles.itemDetailValue}>{item.serie}</Text>
+            </View>
+          )}
+        </View>
+      </View>
+    );
+  };
+
+  // â”€â”€â”€ Render item (modo solo lectura) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const renderItem = (item: TransferenciaItem, index: number) => (
     <View key={item.id || index} style={styles.itemCard}>
       <View style={styles.itemHeader}>
@@ -192,13 +312,11 @@ export default function DetalleTransferenciaScreen() {
       {item.nombre_material && (
         <Text style={styles.itemDescripcion}>{item.nombre_material}</Text>
       )}
-
       <View style={styles.itemDetails}>
         <View style={styles.itemDetail}>
           <Text style={styles.itemDetailLabel}>Solicitado:</Text>
           <Text style={styles.itemDetailValue}>{item.cantidad_solicitada}</Text>
         </View>
-
         {item.cantidad_aceptada !== null && (
           <View style={styles.itemDetail}>
             <Text style={styles.itemDetailLabel}>Aceptado:</Text>
@@ -207,7 +325,6 @@ export default function DetalleTransferenciaScreen() {
             </Text>
           </View>
         )}
-
         {item.serie && (
           <View style={styles.itemDetail}>
             <Text style={styles.itemDetailLabel}>Serie:</Text>
@@ -218,6 +335,7 @@ export default function DetalleTransferenciaScreen() {
     </View>
   );
 
+  // â”€â”€â”€ Loading / not found â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (isLoading) {
     return (
       <View style={styles.loadingContainer}>
@@ -235,9 +353,85 @@ export default function DetalleTransferenciaScreen() {
   }
 
   const estadoColor = getEstadoColor(transferencia.estado);
+  const esResponder = puedeResponder();
+  const totalVerificados = Object.keys(verificados).length;
+
+  // Filtrado de items para la vista de verificaciÃ³n
+  const itemsFiltrados = esResponder && searchVerif
+    ? transferencia.items.filter(item =>
+        item.codigo_material.toLowerCase().includes(searchVerif.toLowerCase()) ||
+        (item.nombre_material || '').toLowerCase().includes(searchVerif.toLowerCase()) ||
+        (item.serie || '').toLowerCase().includes(searchVerif.toLowerCase())
+      )
+    : transferencia.items;
 
   return (
     <SafeAreaView style={styles.container} edges={['bottom']}>
+
+      {/* â”€â”€ Scanner overlay â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+      <Modal
+        visible={isScanning}
+        transparent
+        statusBarTranslucent
+        animationType="fade"
+        onRequestClose={() => setIsScanning(false)}
+      >
+        <View style={StyleSheet.absoluteFillObject}>
+          <CameraView
+            style={StyleSheet.absoluteFillObject}
+            barcodeScannerSettings={{
+              barcodeTypes: ['qr', 'ean13', 'ean8', 'code128', 'code39', 'upc_a', 'upc_e'],
+            }}
+            onBarcodeScanned={handleBarCodeScanned}
+          />
+          <TouchableOpacity style={styles.closeScannerButton} onPress={() => setIsScanning(false)}>
+            <Text style={styles.closeScannerText}>Cancelar Escaneo</Text>
+          </TouchableOpacity>
+        </View>
+      </Modal>
+
+      {/* â”€â”€ Modal cantidad (items no serializados) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ */}
+      <Modal
+        visible={cantidadModal.visible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setCantidadModal({ visible: false, item: null })}
+      >
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={styles.modalOverlay}
+        >
+          <View style={styles.modalBox}>
+            <Text style={styles.modalTitle}>Cantidad a aceptar</Text>
+            {cantidadModal.item && (
+              <Text style={styles.modalSubtitle}>
+                {cantidadModal.item.codigo_material} - solicitado: {cantidadModal.item.cantidad_solicitada}
+              </Text>
+            )}
+            <TextInput
+              style={styles.modalInput}
+              value={cantidadInput}
+              onChangeText={setCantidadInput}
+              keyboardType="numeric"
+              autoFocus
+              selectTextOnFocus
+              placeholder="Cantidad"
+            />
+            <View style={styles.modalActions}>
+              <TouchableOpacity
+                style={styles.modalCancelBtn}
+                onPress={() => setCantidadModal({ visible: false, item: null })}
+              >
+                <Text style={styles.modalCancelText}>Cancelar</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.modalConfirmBtn} onPress={confirmarCantidad}>
+                <Text style={styles.modalConfirmText}>Confirmar</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
       <ScrollView contentContainerStyle={styles.scrollContent}>
         {/* Header con estado */}
         <View style={[styles.headerCard, { borderLeftColor: estadoColor }]}>
@@ -249,7 +443,6 @@ export default function DetalleTransferenciaScreen() {
               </Text>
             </View>
           </View>
-
           <Text style={styles.fechaText}>Creada: {formatDate(transferencia.fecha_creacion)}</Text>
           {transferencia.creado_por && (
             <Text style={styles.fechaText}>Por: {transferencia.creado_por}</Text>
@@ -268,12 +461,10 @@ export default function DetalleTransferenciaScreen() {
               <Text style={styles.rutaTipo}>Almacén: {transferencia.origen_almacen_id}</Text>
             </View>
           </View>
-
           <View style={styles.rutaLinea}>
             <View style={styles.rutaLineaInner} />
             <Text style={styles.rutaFlecha}>↓</Text>
           </View>
-
           <View style={styles.rutaPunto}>
             <View style={[styles.rutaIcon, { backgroundColor: Colors.success + '20' }]}>
               <Text style={styles.rutaIconText}>📥</Text>
@@ -298,55 +489,83 @@ export default function DetalleTransferenciaScreen() {
         <View style={styles.itemsSection}>
           <Text style={styles.sectionTitle}>
             Items ({transferencia.items.length})
+            {esResponder && totalVerificados > 0 && (
+              <Text style={styles.verificadosCount}> · {totalVerificados} verificado(s)</Text>
+            )}
           </Text>
 
-          {transferencia.items.map((item, index) => renderItem(item, index))}
+          {/* Buscador + Scanner â€” solo en modo verificaciÃ³n */}
+          {esResponder && (
+            <View style={styles.searchRow}>
+              <TextInput
+                style={styles.searchInput}
+                value={searchVerif}
+                onChangeText={setSearchVerif}
+                placeholder="Buscar por material o serie..."
+                placeholderTextColor={Colors.textSecondary}
+                clearButtonMode="while-editing"
+              />
+              <TouchableOpacity style={styles.scanBtn} onPress={startScanning}>
+                <Text style={styles.scanBtnText}>📷</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+
+          {itemsFiltrados.map((item, index) =>
+            esResponder
+              ? renderItemVerificacion(item, index)
+              : renderItem(item, index)
+          )}
         </View>
       </ScrollView>
 
-      {/* Botones de acción: Responder */}
-      {puedeResponder() && (
+      {/* Botones de accion */}
+      {(esResponder || puedeCancelar()) && (
         <View style={styles.actionButtons}>
-          <TouchableOpacity
-            style={[styles.actionButton, styles.rejectButton]}
-            onPress={handleRechazar}
-            disabled={isProcessing}
-          >
-            {isProcessing ? (
-              <ActivityIndicator size="small" color={Colors.error} />
-            ) : (
-              <Text style={styles.rejectButtonText}>Rechazar</Text>
-            )}
-          </TouchableOpacity>
+          {esResponder && (
+            <>
+              <TouchableOpacity
+                style={[styles.actionButton, styles.rejectButton]}
+                onPress={handleRechazar}
+                disabled={isProcessing}
+              >
+                {isProcessing
+                  ? <ActivityIndicator size="small" color={Colors.error} />
+                  : <Text style={styles.rejectButtonText}>Rechazar</Text>
+                }
+              </TouchableOpacity>
 
-          <TouchableOpacity
-            style={[styles.actionButton, styles.acceptButton]}
-            onPress={handleAceptar}
-            disabled={isProcessing}
-          >
-            {isProcessing ? (
-              <ActivityIndicator size="small" color={Colors.white} />
-            ) : (
-              <Text style={styles.acceptButtonText}>Aceptar</Text>
-            )}
-          </TouchableOpacity>
-        </View>
-      )}
+              <TouchableOpacity
+                style={[
+                  styles.actionButton,
+                  styles.acceptButton,
+                  totalVerificados === 0 && styles.acceptButtonDisabled,
+                ]}
+                onPress={handleAceptar}
+                disabled={isProcessing || totalVerificados === 0}
+              >
+                {isProcessing
+                  ? <ActivityIndicator size="small" color={Colors.white} />
+                  : <Text style={styles.acceptButtonText}>
+                      Aceptar{totalVerificados > 0 ? ` (${totalVerificados})` : ''}
+                    </Text>
+                }
+              </TouchableOpacity>
+            </>
+          )}
 
-      {/* Botón de cancelar */}
-      {puedeCancelar() && (
-        <View style={styles.actionButtons}>
-          <TouchableOpacity
-            style={[styles.actionButton, styles.cancelButton]}
-            onPress={handleCancelar}
-            disabled={isProcessing}
-          >
-            {isProcessing ? (
-              <ActivityIndicator size="small" color={Colors.error} />
-            ) : (
-              <Text style={styles.cancelButtonText}>Cancelar Transferencia</Text>
-            )}
-          </TouchableOpacity>
+          {!esResponder && puedeCancelar() && (
+            <TouchableOpacity
+              style={[styles.actionButton, styles.cancelButton]}
+              onPress={handleCancelar}
+              disabled={isProcessing}
+            >
+              {isProcessing
+                ? <ActivityIndicator size="small" color={Colors.error} />
+                : <Text style={styles.cancelButtonText}>Cancelar Transferencia</Text>
+              }
+            </TouchableOpacity>
+          )}
         </View>
       )}
     </SafeAreaView>
@@ -371,6 +590,7 @@ const styles = StyleSheet.create({
     padding: Spacing.md,
     paddingBottom: 100,
   },
+  // â”€â”€ Header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   headerCard: {
     backgroundColor: Colors.surface,
     borderRadius: BorderRadius.lg,
@@ -404,6 +624,7 @@ const styles = StyleSheet.create({
     color: Colors.textSecondary,
     marginTop: 2,
   },
+  // â”€â”€ Ruta â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   rutaCard: {
     backgroundColor: Colors.surface,
     borderRadius: BorderRadius.lg,
@@ -455,6 +676,7 @@ const styles = StyleSheet.create({
     fontSize: FontSizes.lg,
     color: Colors.primary,
   },
+  // â”€â”€ Comentario â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   observacionesCard: {
     backgroundColor: Colors.surface,
     borderRadius: BorderRadius.lg,
@@ -471,6 +693,7 @@ const styles = StyleSheet.create({
     fontSize: FontSizes.md,
     color: Colors.text,
   },
+  // â”€â”€ Items â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   itemsSection: {
     marginBottom: Spacing.md,
   },
@@ -480,12 +703,51 @@ const styles = StyleSheet.create({
     color: Colors.text,
     marginBottom: Spacing.sm,
   },
+  verificadosCount: {
+    fontSize: FontSizes.md,
+    fontWeight: '500',
+    color: Colors.success,
+  },
+  searchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: Spacing.sm,
+    gap: Spacing.sm,
+  },
+  searchInput: {
+    flex: 1,
+    backgroundColor: Colors.surface,
+    borderRadius: BorderRadius.md,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    fontSize: FontSizes.md,
+    color: Colors.text,
+  },
+  scanBtn: {
+    backgroundColor: Colors.primary,
+    borderRadius: BorderRadius.md,
+    padding: Spacing.sm,
+    width: 44,
+    height: 44,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  scanBtnText: {
+    fontSize: 20,
+  },
   itemCard: {
     backgroundColor: Colors.surface,
     borderRadius: BorderRadius.md,
     padding: Spacing.md,
     marginBottom: Spacing.sm,
     ...Shadows.sm,
+  },
+  itemCardVerificado: {
+    borderLeftWidth: 3,
+    borderLeftColor: Colors.success,
+    backgroundColor: Colors.success + '0A',
   },
   itemHeader: {
     flexDirection: 'row',
@@ -497,10 +759,35 @@ const styles = StyleSheet.create({
     fontSize: FontSizes.md,
     fontWeight: '600',
     color: Colors.primary,
+    flex: 1,
   },
   itemEstado: {
     fontSize: FontSizes.xs,
     fontWeight: '600',
+  },
+  verificarBtn: {
+    backgroundColor: Colors.primary + '15',
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.xs,
+    borderRadius: BorderRadius.full,
+    borderWidth: 1,
+    borderColor: Colors.primary,
+  },
+  verificarBtnText: {
+    fontSize: FontSizes.sm,
+    color: Colors.primary,
+    fontWeight: '600',
+  },
+  checkBadge: {
+    backgroundColor: Colors.success,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.xs,
+    borderRadius: BorderRadius.full,
+  },
+  checkBadgeText: {
+    fontSize: FontSizes.sm,
+    color: Colors.white,
+    fontWeight: '700',
   },
   itemDescripcion: {
     fontSize: FontSizes.sm,
@@ -526,6 +813,13 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     color: Colors.text,
   },
+  noResults: {
+    fontSize: FontSizes.sm,
+    color: Colors.textSecondary,
+    textAlign: 'center',
+    paddingVertical: Spacing.md,
+  },
+  // â”€â”€ Botones de acciÃ³n â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   actionButtons: {
     position: 'absolute',
     bottom: 0,
@@ -550,6 +844,9 @@ const styles = StyleSheet.create({
   acceptButton: {
     backgroundColor: Colors.success,
   },
+  acceptButtonDisabled: {
+    backgroundColor: Colors.border,
+  },
   acceptButtonText: {
     color: Colors.white,
     fontSize: FontSizes.md,
@@ -573,6 +870,82 @@ const styles = StyleSheet.create({
   cancelButtonText: {
     color: Colors.error,
     fontSize: FontSizes.md,
+    fontWeight: '600',
+  },
+  // â”€â”€ Scanner overlay â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  closeScannerButton: {
+    position: 'absolute',
+    bottom: 40,
+    alignSelf: 'center',
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    paddingHorizontal: Spacing.xl,
+    paddingVertical: Spacing.md,
+    borderRadius: BorderRadius.full,
+  },
+  closeScannerText: {
+    color: Colors.white,
+    fontSize: FontSizes.md,
+    fontWeight: '600',
+  },
+  // â”€â”€ Modal cantidad â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    paddingHorizontal: Spacing.lg,
+  },
+  modalBox: {
+    backgroundColor: Colors.surface,
+    borderRadius: BorderRadius.lg,
+    padding: Spacing.lg,
+  },
+  modalTitle: {
+    fontSize: FontSizes.lg,
+    fontWeight: '700',
+    color: Colors.text,
+    marginBottom: Spacing.xs,
+  },
+  modalSubtitle: {
+    fontSize: FontSizes.sm,
+    color: Colors.textSecondary,
+    marginBottom: Spacing.md,
+  },
+  modalInput: {
+    borderWidth: 1,
+    borderColor: Colors.border,
+    borderRadius: BorderRadius.md,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+    fontSize: FontSizes.xl,
+    color: Colors.text,
+    textAlign: 'center',
+    marginBottom: Spacing.md,
+  },
+  modalActions: {
+    flexDirection: 'row',
+    gap: Spacing.sm,
+  },
+  modalCancelBtn: {
+    flex: 1,
+    padding: Spacing.md,
+    borderRadius: BorderRadius.md,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    alignItems: 'center',
+  },
+  modalCancelText: {
+    color: Colors.textSecondary,
+    fontWeight: '600',
+  },
+  modalConfirmBtn: {
+    flex: 1,
+    padding: Spacing.md,
+    borderRadius: BorderRadius.md,
+    backgroundColor: Colors.primary,
+    alignItems: 'center',
+  },
+  modalConfirmText: {
+    color: Colors.white,
     fontWeight: '600',
   },
 });

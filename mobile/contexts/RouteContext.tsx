@@ -13,6 +13,13 @@ interface GeneratedOrder {
     longitude?: number;
 }
 
+// Applied stock-only info
+interface AppliedStock {
+    appliedAt: Date;
+    latitude?: number | null;
+    longitude?: number | null;
+}
+
 // Reported novedad info
 interface ReportedNovedad {
     note: string;
@@ -20,6 +27,16 @@ interface ReportedNovedad {
     latitude?: number | null;
     longitude?: number | null;
     reportedAt: Date;
+}
+
+// Reagendamiento info
+interface ReagendamientoInfo {
+    fecha_reagendada: string;    // YYYY-MM-DD
+    turno_reagendamiento: string; // MAÑANA | SIESTA | TARDE
+    nota: string;
+    reagendadoAt: Date;
+    latitude?: number | null;
+    longitude?: number | null;
 }
 
 interface RouteContextType {
@@ -30,6 +47,8 @@ interface RouteContextType {
     hasRoute: boolean;
     generatedOrders: Map<string, GeneratedOrder>;
     reportedNovedades: Map<string, ReportedNovedad>;
+    appliedStocks: Map<string, AppliedStock>;
+    reagendamientos: Map<string, ReagendamientoInfo>;
     fetchRouteData: () => Promise<void>;
     syncWithBackend: () => Promise<void>;  // For pull-to-refresh
     getServiceById: (cita: string, ot: string, partida: number) => any | undefined;
@@ -39,6 +58,10 @@ interface RouteContextType {
     getGeneratedOrder: (cita: string, ot: string, partida: number) => GeneratedOrder | undefined;
     setReportedNovedad: (cita: string, ot: string, partida: number, novedadInfo: ReportedNovedad) => void;
     getReportedNovedad: (cita: string, ot: string, partida: number) => ReportedNovedad | undefined;
+    setAppliedStock: (cita: string, ot: string, partida: number, stockInfo: AppliedStock) => void;
+    getAppliedStock: (cita: string, ot: string, partida: number) => AppliedStock | undefined;
+    setReagendamiento: (cita: string, ot: string, partida: number, info: ReagendamientoInfo) => void;
+    getReagendamiento: (cita: string, ot: string, partida: number) => ReagendamientoInfo | undefined;
     isServiceCompleted: (cita: string, ot: string, partida: number) => boolean;
     finalizarRuta: () => Promise<void>;
 }
@@ -51,6 +74,8 @@ const RouteContext = createContext<RouteContextType>({
     hasRoute: false,
     generatedOrders: new Map(),
     reportedNovedades: new Map(),
+    appliedStocks: new Map(),
+    reagendamientos: new Map(),
     fetchRouteData: async () => { },
     syncWithBackend: async () => { },
     getServiceById: () => undefined,
@@ -60,6 +85,10 @@ const RouteContext = createContext<RouteContextType>({
     getGeneratedOrder: () => undefined,
     setReportedNovedad: () => { },
     getReportedNovedad: () => undefined,
+    setAppliedStock: () => { },
+    getAppliedStock: () => undefined,
+    setReagendamiento: () => { },
+    getReagendamiento: () => undefined,
     isServiceCompleted: () => false,
     finalizarRuta: async () => { },
 });
@@ -79,6 +108,8 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
     const isSyncingRef = useRef(false);
     const [generatedOrders, setGeneratedOrders] = useState<Map<string, GeneratedOrder>>(new Map());
     const [reportedNovedades, setReportedNovedades] = useState<Map<string, ReportedNovedad>>(new Map());
+    const [appliedStocks, setAppliedStocks] = useState<Map<string, AppliedStock>>(new Map());
+    const [reagendamientos, setReagendamientos] = useState<Map<string, ReagendamientoInfo>>(new Map());
 
     // Load route data from LOCAL SQLite only (no network calls)
     // This is called on app startup - works fully offline
@@ -116,6 +147,8 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
                 const gestiones = await db.getGestionesByRuta(rutaLocal.ruta.id);
                 const ordersMap = new Map<string, GeneratedOrder>();
                 const novedadesMap = new Map<string, ReportedNovedad>();
+                const stocksMap = new Map<string, AppliedStock>();
+                const reagMap = new Map<string, ReagendamientoInfo>();
 
                 for (const g of gestiones) {
                     const key = getServiceKey(g.cita, g.ot, g.partida);
@@ -136,12 +169,30 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
                             latitude: g.latitude || undefined,
                             longitude: g.longitude || undefined
                         });
+                    } else if (g.tipo === 'STOCK') {
+                        stocksMap.set(key, {
+                            appliedAt: new Date(g.timestamp),
+                            latitude: g.latitude || undefined,
+                            longitude: g.longitude || undefined
+                        });
+                    } else if (g.tipo === 'REAGENDAMIENTO') {
+                        // Last-wins: gestiones are ordered by created_at asc, so later entries overwrite
+                        reagMap.set(key, {
+                            fecha_reagendada: (g as any).fecha_reagendada || '',
+                            turno_reagendamiento: (g as any).turno_reagendamiento || '',
+                            nota: g.nota_novedad || '',
+                            reagendadoAt: new Date(g.timestamp),
+                            latitude: g.latitude || undefined,
+                            longitude: g.longitude || undefined,
+                        });
                     }
                 }
 
                 setGeneratedOrders(ordersMap);
                 setReportedNovedades(novedadesMap);
-                console.log(`RouteContext: Restored ${ordersMap.size} orders and ${novedadesMap.size} novedades from local DB`);
+                setAppliedStocks(stocksMap);
+                setReagendamientos(reagMap);
+                console.log(`RouteContext: Restored ${ordersMap.size} orders, ${novedadesMap.size} novedades, ${stocksMap.size} stocks, ${reagMap.size} reagendamientos from local DB`);
             } else {
                 console.log('RouteContext: No cached route found');
                 setRutaActiva(null);
@@ -149,6 +200,8 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
                 setHasRoute(false);
                 setGeneratedOrders(new Map());
                 setReportedNovedades(new Map());
+                setAppliedStocks(new Map());
+                setReagendamientos(new Map());
             }
         } catch (error) {
             console.error('RouteContext: Error loading local data:', error);
@@ -195,10 +248,14 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
         let downloadSuccess = true;
         let gestionesSynced = 0;
         let stockMovementsSynced = 0;
+        // Hoist db reference so catch block can also write to sync_log
+        let db: any = null;
+        let syncErrorDetail: string | null = null;
+        const syncStartTime = Date.now();
 
         try {
             const { createDatabaseService } = await import('../db/database');
-            const db = createDatabaseService();
+            db = createDatabaseService();
             await db.init();
 
             // Dynamics import to avoid cycles
@@ -282,6 +339,7 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
                     setServicios([]);
                     setGeneratedOrders(new Map());
                     setReportedNovedades(new Map());
+                    setReagendamientos(new Map());
                     setHasRoute(false);
 
                     // Note: We don't return here. We let the function continue to "Download updated route status"
@@ -403,41 +461,50 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
             }
 
             // 3.2 Bajar stock actualizado
-            try {
-                console.log('RouteContext: Downloading stock from backend...');
-                const stockItems = await syncService.getMiStockDiscar();
-                console.log('RouteContext: getMiStockDiscar returned:',
-                    stockItems === null ? 'NULL' :
-                        stockItems === undefined ? 'UNDEFINED' :
-                            `Array(${Array.isArray(stockItems) ? stockItems.length : 'NOT_ARRAY'})`
-                );
-                if (stockItems && stockItems.length > 0) {
-                    console.log('RouteContext: First stock item from backend:', JSON.stringify(stockItems[0]));
-                }
-                if (stockItems && Array.isArray(stockItems)) {
-                    // Map backend data to local schema (handling missing fields and dates)
-                    const mappedStock = stockItems.map((item: any) => ({
-                        codigo_material: item.codigo_material,
-                        nombre_material: item.nombre_material || item.codigo_material,
-                        unidad_medida: item.unidad_medida || (item.serie ? 'SERIALIZADO' : 'UNIDAD'),
-                        serie: item.serie || null,
-                        cantidad: item.cantidad || 0,
-                        fecha_asignacion: item.fecha_asignacion || new Date().toISOString(),
-                        condicion: item.condicion || 'BUENO',
-                        ubicacion_codigo: item.ubicacion_codigo || null
-                    }));
-
-                    console.log(`RouteContext: Mapped ${mappedStock.length} stock items. Saving to DB...`);
-                    await db.saveStockLocal(mappedStock);
-                    console.log(`RouteContext: saveStockLocal completed. Verifying...`);
-
-                    // Verify the save worked
-                    const verification = await db.getStockLocal();
-                    console.log(`RouteContext: Verification - ${verification.length} items in DB after save`);
-                }
-            } catch (stockError) {
-                console.log('RouteContext: Stock download failed:', stockError);
+            // IMPORTANT: Only overwrite local stock if the upload phase succeeded.
+            // If movements failed to upload, the backend stock does not yet reflect
+            // the technician's local operations. Overwriting would cause the delivered
+            // serials to reappear as available until the next successful sync.
+            if (!uploadSuccess) {
+                console.log('RouteContext: Skipping stock download — upload phase had failures. Local stock preserved.');
                 downloadSuccess = false;
+            } else {
+                try {
+                    console.log('RouteContext: Downloading stock from backend...');
+                    const stockItems = await syncService.getMiStockDiscar();
+                    console.log('RouteContext: getMiStockDiscar returned:',
+                        stockItems === null ? 'NULL' :
+                            stockItems === undefined ? 'UNDEFINED' :
+                                `Array(${Array.isArray(stockItems) ? stockItems.length : 'NOT_ARRAY'})`
+                    );
+                    if (stockItems && stockItems.length > 0) {
+                        console.log('RouteContext: First stock item from backend:', JSON.stringify(stockItems[0]));
+                    }
+                    if (stockItems && Array.isArray(stockItems)) {
+                        // Map backend data to local schema (handling missing fields and dates)
+                        const mappedStock = stockItems.map((item: any) => ({
+                            codigo_material: item.codigo_material,
+                            nombre_material: item.nombre_material || item.codigo_material,
+                            unidad_medida: item.unidad_medida || (item.serie ? 'SERIALIZADO' : 'UNIDAD'),
+                            serie: item.serie || null,
+                            cantidad: item.cantidad || 0,
+                            fecha_asignacion: item.fecha_asignacion || new Date().toISOString(),
+                            condicion: item.condicion || 'BUENO',
+                            ubicacion_codigo: item.ubicacion_codigo || null
+                        }));
+
+                        console.log(`RouteContext: Mapped ${mappedStock.length} stock items. Saving to DB...`);
+                        await db.saveStockLocal(mappedStock);
+                        console.log(`RouteContext: saveStockLocal completed. Verifying...`);
+
+                        // Verify the save worked
+                        const verification = await db.getStockLocal();
+                        console.log(`RouteContext: Verification - ${verification.length} items in DB after save`);
+                    }
+                } catch (stockError) {
+                    console.log('RouteContext: Stock download failed:', stockError);
+                    downloadSuccess = false;
+                }
             }
 
             // 3.3 Bajar transferencias pendientes
@@ -492,8 +559,39 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
                 Alert.alert('Sincronización Completa', message);
             }
 
+            // Persist sync result to local log for diagnostics (non-critical)
+            try {
+                await db.saveSyncLog({
+                    timestamp: new Date().toISOString(),
+                    success: (uploadSuccess && downloadSuccess) ? 1 : 0,
+                    upload_success: uploadSuccess ? 1 : 0,
+                    download_success: downloadSuccess ? 1 : 0,
+                    movimientos_enviados: stockMovementsSynced,
+                    gestiones_enviadas: gestionesSynced,
+                    error_detalle: null,
+                    duracion_ms: Date.now() - syncStartTime,
+                });
+            } catch (logErr) {
+                console.log('RouteContext: Failed to save sync log (non-critical):', logErr);
+            }
+
         } catch (error) {
+            syncErrorDetail = error instanceof Error ? error.message : String(error);
             console.error('RouteContext: Sync with backend failed:', error);
+            if (db) {
+                try {
+                    await db.saveSyncLog({
+                        timestamp: new Date().toISOString(),
+                        success: 0,
+                        upload_success: uploadSuccess ? 1 : 0,
+                        download_success: 0,
+                        movimientos_enviados: stockMovementsSynced,
+                        gestiones_enviadas: gestionesSynced,
+                        error_detalle: syncErrorDetail,
+                        duracion_ms: Date.now() - syncStartTime,
+                    });
+                } catch (logErr) { /* ignore */ }
+            }
             Alert.alert('Error de sincronización', 'No se pudo conectar al servidor. Los datos locales se mantienen.');
             // Don't clear local data on sync failure - keep working offline
         } finally {
@@ -622,10 +720,51 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
         return reportedNovedades.get(key);
     };
 
-    // Check if a service is completed (has order OR novedad)
+    // Store applied stock info (also clears any order or novedad for this service)
+    const setAppliedStock = (cita: string, ot: string, partida: number, stockInfo: AppliedStock) => {
+        const key = getServiceKey(cita, ot, partida);
+        setAppliedStocks(prev => {
+            const newMap = new Map(prev);
+            newMap.set(key, stockInfo);
+            return newMap;
+        });
+        // Clear any existing order or novedad
+        setGeneratedOrders(prev => { const m = new Map(prev); m.delete(key); return m; });
+        setReportedNovedades(prev => { const m = new Map(prev); m.delete(key); return m; });
+        updateServiceLocalStatus(cita, ot, partida, 'Stock');
+        if (rutaActiva) {
+            locationService.registerLocation(rutaActiva.id, 'REPORTE');
+        }
+    };
+
+    // Get applied stock info by service ID
+    const getAppliedStock = (cita: string, ot: string, partida: number) => {
+        const key = getServiceKey(cita, ot, partida);
+        return appliedStocks.get(key);
+    };
+
+    // Store reagendamiento info
+    const setReagendamiento = (cita: string, ot: string, partida: number, info: ReagendamientoInfo) => {
+        const key = getServiceKey(cita, ot, partida);
+        setReagendamientos(prev => {
+            const newMap = new Map(prev);
+            newMap.set(key, info);
+            console.log(`RouteContext: Stored reagendamiento for ${key}`);
+            return newMap;
+        });
+        updateServiceLocalStatus(cita, ot, partida, 'Reagendado');
+    };
+
+    // Get reagendamiento info by service ID
+    const getReagendamiento = (cita: string, ot: string, partida: number) => {
+        const key = getServiceKey(cita, ot, partida);
+        return reagendamientos.get(key);
+    };
+
+    // Check if a service is completed (has order, novedad, stock, OR reagendamiento)
     const isServiceCompleted = (cita: string, ot: string, partida: number): boolean => {
         const key = getServiceKey(cita, ot, partida);
-        return generatedOrders.has(key) || reportedNovedades.has(key);
+        return generatedOrders.has(key) || reportedNovedades.has(key) || appliedStocks.has(key) || reagendamientos.has(key);
     };
 
     // Finalizar la ruta actual
@@ -670,6 +809,8 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
             hasRoute,
             generatedOrders,
             reportedNovedades,
+            appliedStocks,
+            reagendamientos,
             fetchRouteData,
             syncWithBackend,
             getServiceById,
@@ -679,6 +820,10 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
             getGeneratedOrder,
             setReportedNovedad,
             getReportedNovedad,
+            setAppliedStock,
+            getAppliedStock,
+            setReagendamiento,
+            getReagendamiento,
             isServiceCompleted,
             finalizarRuta,
         }}>

@@ -45,7 +45,7 @@ export interface DatabaseService {
     // Stock local methods
     getStockLocal(): Promise<StockLocalItem[]>;
     saveStockLocal(items: StockLocalItem[]): Promise<void>;
-    updateStockLocal(codigoMaterial: string, serie: string | null, cantidad: number, tipo: 'add' | 'remove'): Promise<void>;
+    updateStockLocal(codigoMaterial: string, serie: string | null, cantidad: number, tipo: 'add' | 'remove', condicion?: string): Promise<void>;
     changeCondicionLocal(codigoMaterial: string, serie: string | null, cantidad: number, nuevaCondicion: string): Promise<void>;
     // Movimientos pendientes
     addMovimientoPendiente(mov: MovimientoPendiente): Promise<number>;
@@ -73,11 +73,17 @@ export interface DatabaseService {
     // Plantillas de materiales
     savePlantillasMaterial(plantillas: any[]): Promise<void>;
     getPlantillasMaterial(tipo_incidente?: string, tipo_cierre?: string): Promise<any[]>;
+    // Sync diagnostics log
+    saveSyncLog(entry: SyncLogEntry): Promise<void>;
+    getLastSyncLogs(limit?: number): Promise<SyncLogEntry[]>;
+    // Stock sync idempotency
+    getOrCreateStockBatchId(): Promise<string>;
+    clearStockBatchId(): Promise<void>;
 }
 
 // Type for saving a new gestion
 export interface GestionData {
-    tipo: 'ORDEN' | 'NOVEDAD';
+    tipo: 'ORDEN' | 'NOVEDAD' | 'STOCK' | 'REAGENDAMIENTO';
     ruta_id: number;  // Route ID for tracking
     cita: string;
     ot: string;
@@ -97,6 +103,8 @@ export interface GestionData {
     order_image_path?: string;
     nota_novedad?: string;
     novedad_image_path?: string;
+    fecha_reagendada?: string | null;
+    turno_reagendamiento?: string | null;
     latitude?: number | null;
     longitude?: number | null;
     timestamp: string;
@@ -175,6 +183,19 @@ export interface AppNotificacion {
     prioridad: 'critico' | 'importante' | 'info';
     fecha_inicio?: string;
     fecha_fin?: string;
+}
+
+// Type for sync operation audit log
+export interface SyncLogEntry {
+    id?: number;
+    timestamp: string;
+    success: number;           // 1 = success, 0 = failure
+    upload_success: number;
+    download_success: number;
+    movimientos_enviados: number;
+    gestiones_enviadas: number;
+    error_detalle: string | null;
+    duracion_ms: number;
 }
 
 
@@ -325,6 +346,14 @@ class DatabaseServiceImpl implements DatabaseService {
         } catch (e) {
             // Column already exists, ignore
         }
+
+        // Migration: Add reagendamiento columns if they don't exist
+        try {
+            await db.execAsync(`ALTER TABLE gestiones ADD COLUMN fecha_reagendada TEXT`);
+        } catch (e) { /* Column already exists */ }
+        try {
+            await db.execAsync(`ALTER TABLE gestiones ADD COLUMN turno_reagendamiento TEXT`);
+        } catch (e) { /* Column already exists */ }
 
         // Table for tracking pending image uploads (retry queue)
         await db.execAsync(`
@@ -587,6 +616,22 @@ class DatabaseServiceImpl implements DatabaseService {
             CREATE INDEX IF NOT EXISTS idx_plantillas_items_plantilla
             ON plantillas_material_items(plantilla_id);
         `);
+
+        // ==================== SYNC LOG ====================
+        await db.execAsync(`
+            CREATE TABLE IF NOT EXISTS sync_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                success INTEGER DEFAULT 0,
+                upload_success INTEGER DEFAULT 0,
+                download_success INTEGER DEFAULT 0,
+                movimientos_enviados INTEGER DEFAULT 0,
+                gestiones_enviadas INTEGER DEFAULT 0,
+                error_detalle TEXT,
+                duracion_ms INTEGER DEFAULT 0
+            );
+        `);
+
         // Schema migration guards: add columns that may be missing in older builds
         try {
             await db.execAsync(`ALTER TABLE plantillas_material_items ADD COLUMN nombre_material TEXT`);
@@ -596,6 +641,14 @@ class DatabaseServiceImpl implements DatabaseService {
             await db.execAsync(`ALTER TABLE plantillas_material_items ADD COLUMN unidad_medida TEXT`);
             console.log('Database: Added unidad_medida column to plantillas_material_items');
         } catch (e) { /* column already exists */ }
+
+        // ==================== APP SETTINGS (KV) ====================
+        await db.execAsync(`
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+        `);
 
         console.log('Database initialized and tables verified.');
     }
@@ -687,8 +740,9 @@ class DatabaseServiceImpl implements DatabaseService {
                 cliente_nombre, cliente_dni, cliente_firma,
                 tecnico_nombre, tecnico_dni, tecnico_firma,
                 order_image_path, nota_novedad, novedad_image_path,
+                fecha_reagendada, turno_reagendamiento,
                 latitude, longitude, timestamp, status, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)`,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)`,
             [
                 gestion.tipo,
                 gestion.ruta_id,
@@ -710,6 +764,8 @@ class DatabaseServiceImpl implements DatabaseService {
                 gestion.order_image_path || null,
                 gestion.nota_novedad || null,
                 gestion.novedad_image_path || null,
+                gestion.fecha_reagendada || null,
+                gestion.turno_reagendamiento || null,
                 gestion.latitude || null,
                 gestion.longitude || null,
                 gestion.timestamp,
@@ -923,11 +979,19 @@ class DatabaseServiceImpl implements DatabaseService {
             const existing = await db.getFirstAsync(query, params);
 
             if (existing) {
-                // Update quantity and force update condition (to latest known state)
-                await db.runAsync(
-                    'UPDATE stock_local SET cantidad = cantidad + ?, condicion = ? WHERE id = ?',
-                    [cantidad, cond, existing.id]
-                );
+                if (serie) {
+                    // Serialized: quantity is always 1, only update condition to latest known state
+                    await db.runAsync(
+                        'UPDATE stock_local SET cantidad = 1, condicion = ? WHERE id = ?',
+                        [cond, existing.id]
+                    );
+                } else {
+                    // Non-serialized: accumulate quantity
+                    await db.runAsync(
+                        'UPDATE stock_local SET cantidad = cantidad + ?, condicion = ? WHERE id = ?',
+                        [cantidad, cond, existing.id]
+                    );
+                }
             } else {
                 // Look up material metadata for name and unidad_medida
                 const materialInfo: any = await db.getFirstAsync(
@@ -1350,6 +1414,64 @@ class DatabaseServiceImpl implements DatabaseService {
             }
         }
         console.log(`DatabaseService: Done — ${savedCount}/${plantillas.length} plantillas saved`);
+    }
+
+    async saveSyncLog(entry: SyncLogEntry): Promise<void> {
+        const db = await this.getDb();
+        await db.runAsync(
+            `INSERT INTO sync_log (timestamp, success, upload_success, download_success,
+             movimientos_enviados, gestiones_enviadas, error_detalle, duracion_ms)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+                entry.timestamp,
+                entry.success,
+                entry.upload_success,
+                entry.download_success,
+                entry.movimientos_enviados,
+                entry.gestiones_enviadas,
+                entry.error_detalle ?? null,
+                entry.duracion_ms,
+            ]
+        );
+        // Keep only last 50 entries to avoid unbounded growth
+        await db.execAsync(
+            `DELETE FROM sync_log WHERE id NOT IN (SELECT id FROM sync_log ORDER BY id DESC LIMIT 50)`
+        );
+    }
+
+    async getOrCreateStockBatchId(): Promise<string> {
+        const db = await this.getDb();
+        const row: any = await db.getFirstAsync(
+            `SELECT value FROM app_settings WHERE key = 'stock_batch_id'`
+        );
+        if (row?.value) return row.value;
+        // Generate and persist a new UUID
+        const bytes = new Uint8Array(16);
+        for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+        const uuid = `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+        await db.runAsync(
+            `INSERT OR REPLACE INTO app_settings (key, value) VALUES ('stock_batch_id', ?)`,
+            [uuid]
+        );
+        console.log(`DatabaseService: Created new stock_batch_id: ${uuid}`);
+        return uuid;
+    }
+
+    async clearStockBatchId(): Promise<void> {
+        const db = await this.getDb();
+        await db.runAsync(`DELETE FROM app_settings WHERE key = 'stock_batch_id'`);
+        console.log('DatabaseService: Cleared stock_batch_id');
+    }
+
+    async getLastSyncLogs(limit: number = 10): Promise<SyncLogEntry[]> {
+        const db = await this.getDb();
+        return await db.getAllAsync(
+            `SELECT * FROM sync_log ORDER BY id DESC LIMIT ?`,
+            [limit]
+        ) as SyncLogEntry[];
     }
 
     async getPlantillasMaterial(tipo_incidente?: string, tipo_cierre?: string): Promise<any[]> {

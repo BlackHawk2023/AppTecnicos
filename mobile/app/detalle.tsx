@@ -13,7 +13,7 @@ export default function ServiceDetailScreen() {
     console.log('ServiceDetailScreen MOUNTED');
     const params = useLocalSearchParams();
     const router = useRouter();
-    const { getServicesByOT, getGeneratedOrder, getReportedNovedad, isServiceCompleted } = useRoute();
+    const { getServicesByOT, getGeneratedOrder, getReportedNovedad, getReagendamiento, isServiceCompleted } = useRoute();
     const [partidas, setPartidas] = useState<any[]>([]);
     const insets = useSafeAreaInsets();
 
@@ -159,6 +159,26 @@ export default function ServiceDetailScreen() {
             instrucciones: p.instrucciones,
         });
     };
+    const handleSoloStock = () => {
+        router.push({
+            pathname: '/servicio/solo-stock' as any,
+            params: {
+                cita: cita as string,
+                ot: ot as string,
+            }
+        });
+    };
+
+    const handleReagendar = () => {
+        router.push({
+            pathname: '/servicio/reagendar' as any,
+            params: {
+                cita: cita as string,
+                ot: ot as string,
+            }
+        });
+    };
+
     // Navigate to order generation (will need to select partidas there)
     const handleGenerarOrden = () => {
         router.push({
@@ -182,6 +202,15 @@ export default function ServiceDetailScreen() {
     // Check how many partidas are completed
     const completedCount = partidas.filter(p => isServiceCompleted(p.cita, p.ot, p.partida)).length;
     const allCompleted = partidas.length > 0 && completedCount === partidas.length;
+
+    // Find the last reagendamiento across all partidas (for display)
+    let lastReagendamiento: ReturnType<typeof getReagendamiento> = undefined;
+    for (const p of partidas) {
+        const r = getReagendamiento(p.cita, p.ot, p.partida);
+        if (r && (!lastReagendamiento || r.reagendadoAt > lastReagendamiento.reagendadoAt)) {
+            lastReagendamiento = r;
+        }
+    }
 
     // Handle phone call
     const handleCall = () => {
@@ -347,11 +376,38 @@ export default function ServiceDetailScreen() {
                     {partidas.map((p, i) => renderPartidaCard(p, i))}
                 </View>
 
+                {/* Reagendamiento info block */}
+                {lastReagendamiento && (() => {
+                    const { fecha_reagendada, turno_reagendamiento, nota } = lastReagendamiento;
+                    const [y, m, d] = fecha_reagendada.split('-');
+                    const fechaDisplay = `${d}/${m}/${y}`;
+                    return (
+                        <View style={styles.reagendamientoInfoBlock}>
+                            <View style={styles.reagendamientoInfoRow}>
+                                <Ionicons name="calendar" size={18} color="#c39bd3" />
+                                <Text style={styles.reagendamientoInfoTitle}>Último reagendamiento</Text>
+                            </View>
+                            <Text style={styles.reagendamientoInfoDate}>{fechaDisplay} — {turno_reagendamiento}</Text>
+                            {!!nota && <Text style={styles.reagendamientoInfoNota}>{nota}</Text>}
+                        </View>
+                    );
+                })()}
+
                 {/* Action Buttons */}
                 <View style={[styles.bottomActions, { marginBottom: insets.bottom + 20 }]}>
                     <TouchableOpacity style={styles.novedadButton} onPress={handleCargarNovedad}>
                         <Ionicons name="alert-circle-outline" size={24} color="#fff" />
                         <Text style={styles.novedadButtonText}>REPORTAR NOVEDAD</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity style={styles.stockButton} onPress={handleSoloStock}>
+                        <Ionicons name="layers-outline" size={24} color="#fff" />
+                        <Text style={styles.stockButtonText}>APLICAR STOCK</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity style={styles.reagendarButton} onPress={handleReagendar}>
+                        <Ionicons name="calendar-outline" size={24} color="#fff" />
+                        <Text style={styles.reagendarButtonText}>REAGENDAR</Text>
                     </TouchableOpacity>
 
                     <TouchableOpacity style={styles.orderButtonEnabled} onPress={handleGenerarOrden}>
@@ -606,6 +662,66 @@ const styles = StyleSheet.create({
     bottomActions: {
         gap: 16,
         marginBottom: 20,
+    },
+    reagendamientoInfoBlock: {
+        backgroundColor: '#2d1b3d',
+        borderRadius: 12,
+        padding: 14,
+        marginBottom: 16,
+        borderWidth: 1,
+        borderColor: '#6c3483',
+    },
+    reagendamientoInfoRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+        marginBottom: 6,
+    },
+    reagendamientoInfoTitle: {
+        color: '#c39bd3',
+        fontWeight: 'bold',
+        fontSize: 13,
+        textTransform: 'uppercase',
+        letterSpacing: 0.5,
+    },
+    reagendamientoInfoDate: {
+        color: '#fff',
+        fontSize: 16,
+        fontWeight: 'bold',
+        marginBottom: 4,
+    },
+    reagendamientoInfoNota: {
+        color: '#aaa',
+        fontSize: 13,
+        fontStyle: 'italic',
+    },
+    stockButton: {
+        backgroundColor: '#2980b9',
+        padding: 16,
+        borderRadius: 12,
+        alignItems: 'center',
+        borderWidth: 1,
+        borderColor: '#3498db',
+    },
+    stockButtonText: {
+        color: '#fff',
+        fontWeight: 'bold',
+        fontSize: 16,
+        marginTop: 4,
+    },
+    reagendarButton: {
+        backgroundColor: '#6c3483',
+        padding: 16,
+        borderRadius: 12,
+        alignItems: 'center',
+        borderWidth: 1,
+        borderColor: '#8e44ad',
+    },
+    reagendarButtonText: {
+        color: '#fff',
+        fontWeight: 'bold',
+        fontSize: 16,
+        marginTop: 4,
     },
     novedadButton: {
         backgroundColor: '#c0392b',

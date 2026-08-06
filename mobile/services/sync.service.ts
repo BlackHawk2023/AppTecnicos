@@ -188,20 +188,16 @@ class SyncService {
                 console.warn('SyncService: Could not download stock — preserving local cache:', stockError);
             }
 
-            // 5. After downloading metadata, try to upload any pending gestiones
-            console.log('SyncService: Triggering pending gestiones upload...');
-            const uploadResult = await this.syncPendingOrders();
-            if (uploadResult.success && uploadResult.message !== 'No hay gestiones pendientes') {
-                console.log(`SyncService: Pending sync completed - ${uploadResult.message}`);
-            }
+            // NOTE: syncPendingOrders and syncStockMovements are NOT called here.
+            // When syncMetadata is called from RouteContext.syncWithBackend, uploads
+            // are already handled in FASE 1 before this call. Doing them here again
+            // would send duplicate network requests (and risk double-processing).
+            // They are only relevant when syncMetadata is called standalone (e.g. login).
 
-            // 6. Sync stock movements
-            await this.syncStockMovements();
-
-            // 7. Sync credential photo (with hash check for change detection)
+            // 5. Sync credential photo (with hash check for change detection)
             await this.syncCredentialPhoto();
 
-            // 8. Sync pending locations
+            // 6. Sync pending locations
             await this.syncLocations();
 
             return {
@@ -320,6 +316,8 @@ class SyncService {
                     detalle_trabajo: g.detalle_trabajo || null,
                     observaciones: g.observaciones || null,
                     nota_novedad: g.nota_novedad || null,
+                    fecha_reagendada: g.fecha_reagendada || null,
+                    turno_reagendamiento: g.turno_reagendamiento || null,
 
                     // Materials
                     material_retirado: materialRetirado || [],
@@ -504,7 +502,8 @@ class SyncService {
             }));
 
             // Send to backend with batch_id for idempotency
-            const batch_id = generateSyncBatchId();
+            // batch_id is persisted in SQLite so retries reuse the same UUID
+            const batch_id = await databaseService.getOrCreateStockBatchId();
             const response = await api.post('/mobile/stock/sync-movimientos', {
                 movimientos: movimientos,
                 batch_id: batch_id
@@ -517,6 +516,9 @@ class SyncService {
 
                 // Clear synced movements
                 await databaseService.clearSyncedMovimientos();
+
+                // Reset batch_id so next sync group gets a fresh UUID
+                await databaseService.clearStockBatchId();
 
                 console.log(`SyncService: Successfully synced ${pendingMovements.length} stock movements`);
                 return {

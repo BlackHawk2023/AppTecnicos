@@ -129,6 +129,16 @@ export default function ServiceDetailScreen() {
         });
     };
 
+    const handleSoloStock = () => {
+        router.push({
+            pathname: '/servicio/solo-stock' as any,
+            params: {
+                cita: cita as string,
+                ot: ot as string,
+            }
+        });
+    };
+
     // Navigate to order generation (will need to select partidas there)
     const handleGenerarOrden = () => {
         router.push({
@@ -312,6 +322,11 @@ export default function ServiceDetailScreen() {
                         <Text style={styles.novedadButtonText}>REPORTAR NOVEDAD</Text>
                     </TouchableOpacity>
 
+                    <TouchableOpacity style={styles.stockButton} onPress={handleSoloStock}>
+                        <Ionicons name="layers-outline" size={24} color="#fff" />
+                        <Text style={styles.stockButtonText}>APLICAR STOCK</Text>
+                    </TouchableOpacity>
+
                     <TouchableOpacity style={styles.orderButtonEnabled} onPress={handleGenerarOrden}>
                         <Ionicons name="document-text-outline" size={24} color="#fff" />
                         <Text style={styles.orderButtonTextEnabled}>GENERAR ORDEN</Text>
@@ -492,6 +507,20 @@ const styles = StyleSheet.create({
     bottomActions: {
         gap: 16,
         marginBottom: 20,
+    },
+    stockButton: {
+        backgroundColor: '#2980b9',
+        padding: 16,
+        borderRadius: 12,
+        alignItems: 'center',
+        borderWidth: 1,
+        borderColor: '#3498db',
+    },
+    stockButtonText: {
+        color: '#fff',
+        fontWeight: 'bold',
+        fontSize: 16,
+        marginTop: 4,
     },
     novedadButton: {
         backgroundColor: '#c0392b',

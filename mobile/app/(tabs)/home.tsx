@@ -20,7 +20,7 @@ interface GroupedOT {
 
 export default function HomeScreen() {
     const { user } = useAuth();
-    const { rutaActiva, servicios, loading, refreshing, hasRoute, syncWithBackend, isServiceCompleted, finalizarRuta } = useRoute(); // Use Context
+    const { rutaActiva, servicios, loading, refreshing, hasRoute, syncWithBackend, isServiceCompleted, getReagendamiento, finalizarRuta } = useRoute(); // Use Context
     const router = useRouter();
     const insets = useSafeAreaInsets();
     const [perfilRecorrido, setPerfilRecorrido] = React.useState<'car' | 'foot'>('car');
@@ -170,6 +170,28 @@ export default function HomeScreen() {
         ).length;
         const key = `${group.cita}-${group.ot}`;
 
+        // Find the last reagendamiento across all partidas (last by reagendadoAt)
+        let lastReagen: ReturnType<typeof getReagendamiento> = undefined;
+        for (const p of group.partidas) {
+            const r = getReagendamiento(p.cita, p.ot, p.partida);
+            if (r && (!lastReagen || r.reagendadoAt > lastReagen.reagendadoAt)) {
+                lastReagen = r;
+            }
+        }
+
+        // Format reagendamiento date label
+        let reaLabel = '';
+        if (lastReagen) {
+            const today = new Date();
+            const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+            if (lastReagen.fecha_reagendada === todayStr) {
+                reaLabel = `Reagendado para Hoy por la ${lastReagen.turno_reagendamiento}`;
+            } else {
+                const [y, m, d] = lastReagen.fecha_reagendada.split('-');
+                reaLabel = `Reagendado para el ${d}/${m}/${y} por la ${lastReagen.turno_reagendamiento}`;
+            }
+        }
+
         return (
             <Pressable
                 key={key}
@@ -213,6 +235,12 @@ export default function HomeScreen() {
                         <Ionicons name="time-outline" size={16} color="#aaa" />
                         <Text style={styles.infoText}>{group.vencimiento_sla ? new Date(group.vencimiento_sla).toLocaleDateString() : 'Sin fecha'}</Text>
                     </View>
+                    {!!reaLabel && (
+                        <View style={styles.reagendadoBadge}>
+                            <Ionicons name="calendar-outline" size={14} color="#c39bd3" />
+                            <Text style={styles.reagendadoText}>{reaLabel}</Text>
+                        </View>
+                    )}
                 </View>
             </Pressable>
         );
@@ -575,6 +603,23 @@ const styles = StyleSheet.create({
         color: '#fff',
         fontSize: 11,
         fontWeight: 'bold',
+    },
+    reagendadoBadge: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        backgroundColor: '#2d1b3d',
+        paddingHorizontal: 10,
+        paddingVertical: 5,
+        borderRadius: 8,
+        borderWidth: 1,
+        borderColor: '#6c3483',
+        marginTop: 4,
+        gap: 6,
+    },
+    reagendadoText: {
+        color: '#c39bd3',
+        fontSize: 12,
+        fontWeight: '600',
     },
     recorridoContainer: {
         marginBottom: 16,

@@ -59,8 +59,9 @@ export interface CrearTransferenciaData {
 }
 
 export interface ResponderTransferenciaData {
-  accion: 'aceptar' | 'rechazar';
-  items?: { item_id: number; cantidad: number }[];
+  accion: 'ACEPTAR' | 'RECHAZAR';
+  items?: { item_id: number; aceptar: boolean; cantidad_aceptada: number }[];
+  comentario?: string;
 }
 
 export interface Tecnico {

@@ -66,7 +66,7 @@ export interface DatabaseService {
 
 // Type for saving a new gestion
 export interface GestionData {
-    tipo: 'ORDEN' | 'NOVEDAD';
+    tipo: 'ORDEN' | 'NOVEDAD' | 'STOCK';
     ruta_id: number;  // Route ID for tracking
     cita: string;
     ot: string;

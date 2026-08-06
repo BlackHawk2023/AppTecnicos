@@ -13,6 +13,7 @@ web-build/
 # Generated native folders
 android/
 ios/
+mobile/.gradle-cli/
 
 # Local IDE/editor settings
 .idea/

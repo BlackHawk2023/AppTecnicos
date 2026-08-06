@@ -31,6 +31,7 @@ import Mustache from 'mustache';
 import { captureRef } from 'react-native-view-shot';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
+import * as ImageManipulator from 'expo-image-manipulator';
 import { PAYWAY_LOGO_BASE64, DISCAR_LOGO_BASE64 } from '../../constants/logo';
 
 // Types
@@ -814,15 +815,28 @@ export default function EjecucionScreen() {
             await new Promise(resolve => setTimeout(resolve, 300));
 
             const photo = await cameraRef.current.takePictureAsync({
-                quality: 0.7,
+                quality: 0.85,
                 base64: false,
             });
 
             if (photo?.uri) {
+                // Crop to the center strip of the image where the serial label/barcode is.
+                // The scan frame overlay covers approx 80% width × 50% height of the camera area.
+                const cropWidth = Math.round(photo.width * 0.8);
+                const cropHeight = Math.round(photo.height * 0.5);
+                const cropOriginX = Math.round((photo.width - cropWidth) / 2);
+                const cropOriginY = Math.round((photo.height - cropHeight) / 2);
+
+                const cropped = await ImageManipulator.manipulateAsync(
+                    photo.uri,
+                    [{ crop: { originX: cropOriginX, originY: cropOriginY, width: cropWidth, height: cropHeight } }],
+                    { compress: 0.85, format: ImageManipulator.SaveFormat.JPEG }
+                );
+
                 // Save to permanent location
                 const fileName = `serie_${scannerTarget.id}_${Date.now()}.jpg`;
                 const permanentPath = (FileSystem.documentDirectory || '') + fileName;
-                await FileSystem.moveAsync({ from: photo.uri, to: permanentPath });
+                await FileSystem.moveAsync({ from: cropped.uri, to: permanentPath });
 
                 // Update material with photo path
                 updateMaterialPhoto(scannerTarget.type, scannerTarget.id, permanentPath);
@@ -1933,24 +1947,26 @@ export default function EjecucionScreen() {
                                                         key={plantilla.id}
                                                         style={styles.plantillaItem}
                                                         onPress={() => {
-                                                            const retiro = plantilla.items
-                                                                ?.filter((it: any) => it.tipo === 'RETIRO')
+                                                            const retiro: MaterialItem[] = (plantilla.items || [])
+                                                                .filter((it: any) => it.tipo === 'RETIRO')
                                                                 .map((it: any) => ({
-                                                                    codigo_material: it.codigo_material || '',
+                                                                    id: `plantilla-ret-${it.id}-${Date.now()}`,
+                                                                    material: it.codigo_material || '',
                                                                     nombre_material: it.nombre_material || it.codigo_material || '',
+                                                                    serie_o_cantidad: it.unidad_medida === 'SERIALIZADO' ? '' : (it.cantidad ? String(it.cantidad) : '1'),
+                                                                    condicion: 'BUENO',
                                                                     unidad_medida: it.unidad_medida || 'UNIDAD',
-                                                                    serie: '',
-                                                                    cantidad: it.cantidad || 1,
-                                                                })) || [];
-                                                            const entrega = plantilla.items
-                                                                ?.filter((it: any) => it.tipo === 'ENTREGA')
+                                                                }));
+                                                            const entrega: MaterialItem[] = (plantilla.items || [])
+                                                                .filter((it: any) => it.tipo === 'ENTREGA')
                                                                 .map((it: any) => ({
-                                                                    codigo_material: it.codigo_material || '',
+                                                                    id: `plantilla-ent-${it.id}-${Date.now()}`,
+                                                                    material: it.codigo_material || '',
                                                                     nombre_material: it.nombre_material || it.codigo_material || '',
+                                                                    serie_o_cantidad: it.unidad_medida === 'SERIALIZADO' ? '' : (it.cantidad ? String(it.cantidad) : '1'),
+                                                                    condicion: 'BUENO',
                                                                     unidad_medida: it.unidad_medida || 'UNIDAD',
-                                                                    serie: '',
-                                                                    cantidad: it.cantidad || 1,
-                                                                })) || [];
+                                                                }));
                                                             setFormData(prev => ({
                                                                 ...prev,
                                                                 material_retirado: retiro,

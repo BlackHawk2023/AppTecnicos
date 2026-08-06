@@ -2,7 +2,7 @@
   "expo": {
     "name": "STDiscar",
     "slug": "stdiscar-tecnicos",
-    "version": "2.1.1",
+    "version": "2.2.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "stdiscar",
@@ -90,7 +90,8 @@
           "color": "#1a1a1a",
           "defaultChannel": "route-tracking"
         }
-      ]
+      ],
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true,

@@ -22,6 +22,13 @@ interface ReportedNovedad {
     reportedAt: Date;
 }
 
+// Applied stock info
+interface AppliedStock {
+    appliedAt: Date;
+    latitude?: number | null;
+    longitude?: number | null;
+}
+
 interface RouteContextType {
     rutaActiva: RutaResumen | null;
     servicios: any[];
@@ -30,6 +37,7 @@ interface RouteContextType {
     hasRoute: boolean;
     generatedOrders: Map<string, GeneratedOrder>;
     reportedNovedades: Map<string, ReportedNovedad>;
+    appliedStocks: Map<string, AppliedStock>;
     fetchRouteData: () => Promise<void>;
     syncWithBackend: () => Promise<void>;  // For pull-to-refresh
     getServiceById: (cita: string, ot: string, partida: number) => any | undefined;
@@ -39,6 +47,8 @@ interface RouteContextType {
     getGeneratedOrder: (cita: string, ot: string, partida: number) => GeneratedOrder | undefined;
     setReportedNovedad: (cita: string, ot: string, partida: number, novedadInfo: ReportedNovedad) => void;
     getReportedNovedad: (cita: string, ot: string, partida: number) => ReportedNovedad | undefined;
+    setAppliedStock: (cita: string, ot: string, partida: number, stockInfo: AppliedStock) => void;
+    getAppliedStock: (cita: string, ot: string, partida: number) => AppliedStock | undefined;
     isServiceCompleted: (cita: string, ot: string, partida: number) => boolean;
     finalizarRuta: () => Promise<void>;
 }
@@ -51,6 +61,7 @@ const RouteContext = createContext<RouteContextType>({
     hasRoute: false,
     generatedOrders: new Map(),
     reportedNovedades: new Map(),
+    appliedStocks: new Map(),
     fetchRouteData: async () => { },
     syncWithBackend: async () => { },
     getServiceById: () => undefined,
@@ -60,6 +71,8 @@ const RouteContext = createContext<RouteContextType>({
     getGeneratedOrder: () => undefined,
     setReportedNovedad: () => { },
     getReportedNovedad: () => undefined,
+    setAppliedStock: () => { },
+    getAppliedStock: () => undefined,
     isServiceCompleted: () => false,
     finalizarRuta: async () => { },
 });
@@ -78,6 +91,7 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
     const [hasRoute, setHasRoute] = useState(false);
     const [generatedOrders, setGeneratedOrders] = useState<Map<string, GeneratedOrder>>(new Map());
     const [reportedNovedades, setReportedNovedades] = useState<Map<string, ReportedNovedad>>(new Map());
+    const [appliedStocks, setAppliedStocks] = useState<Map<string, AppliedStock>>(new Map());
 
     // Load route data from LOCAL SQLite only (no network calls)
     // This is called on app startup - works fully offline
@@ -115,6 +129,7 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
                 const gestiones = await db.getGestionesByRuta(rutaLocal.ruta.id);
                 const ordersMap = new Map<string, GeneratedOrder>();
                 const novedadesMap = new Map<string, ReportedNovedad>();
+                const stocksMap = new Map<string, AppliedStock>();
 
                 for (const g of gestiones) {
                     const key = getServiceKey(g.cita, g.ot, g.partida);
@@ -135,11 +150,18 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
                             latitude: g.latitude || undefined,
                             longitude: g.longitude || undefined
                         });
+                    } else if (g.tipo === 'STOCK') {
+                        stocksMap.set(key, {
+                            appliedAt: new Date(g.timestamp),
+                            latitude: g.latitude || undefined,
+                            longitude: g.longitude || undefined,
+                        });
                     }
                 }
 
                 setGeneratedOrders(ordersMap);
                 setReportedNovedades(novedadesMap);
+                setAppliedStocks(stocksMap);
                 console.log(`RouteContext: Restored ${ordersMap.size} orders and ${novedadesMap.size} novedades from local DB`);
             } else {
                 console.log('RouteContext: No cached route found');
@@ -148,6 +170,7 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
                 setHasRoute(false);
                 setGeneratedOrders(new Map());
                 setReportedNovedades(new Map());
+                setAppliedStocks(new Map());
             }
         } catch (error) {
             console.error('RouteContext: Error loading local data:', error);
@@ -235,8 +258,7 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
                     setServicios([]);
                     setGeneratedOrders(new Map());
                     setReportedNovedades(new Map());
-                    setHasRoute(false);
-
+                setAppliedStocks(new Map());
                     // Note: We don't return here. We let the function continue to "Download updated route status"
                 } catch (finalizeError) {
                     console.error('RouteContext: Backend finalization failed:', finalizeError);
@@ -531,10 +553,45 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
         return reportedNovedades.get(key);
     };
 
-    // Check if a service is completed (has order OR novedad)
+    // Store applied stock info (also clears order/novedad for this service)
+    const setAppliedStock = (cita: string, ot: string, partida: number, stockInfo: AppliedStock) => {
+        const key = getServiceKey(cita, ot, partida);
+
+        setAppliedStocks(prev => {
+            const newMap = new Map(prev);
+            newMap.set(key, stockInfo);
+            return newMap;
+        });
+
+        setGeneratedOrders(prev => {
+            const newMap = new Map(prev);
+            newMap.delete(key);
+            return newMap;
+        });
+
+        setReportedNovedades(prev => {
+            const newMap = new Map(prev);
+            newMap.delete(key);
+            return newMap;
+        });
+
+        updateServiceLocalStatus(cita, ot, partida, 'Stock');
+
+        if (rutaActiva) {
+            locationService.registerLocation(rutaActiva.id, 'REPORTE');
+        }
+    };
+
+    // Get applied stock by service ID
+    const getAppliedStock = (cita: string, ot: string, partida: number) => {
+        const key = getServiceKey(cita, ot, partida);
+        return appliedStocks.get(key);
+    };
+
+    // Check if a service is completed (has order OR novedad OR applied stock)
     const isServiceCompleted = (cita: string, ot: string, partida: number): boolean => {
         const key = getServiceKey(cita, ot, partida);
-        return generatedOrders.has(key) || reportedNovedades.has(key);
+        return generatedOrders.has(key) || reportedNovedades.has(key) || appliedStocks.has(key);
     };
 
     // Finalizar la ruta actual
@@ -579,6 +636,7 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
             hasRoute,
             generatedOrders,
             reportedNovedades,
+            appliedStocks,
             fetchRouteData,
             syncWithBackend,
             getServiceById,
@@ -588,6 +646,8 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
             getGeneratedOrder,
             setReportedNovedad,
             getReportedNovedad,
+            setAppliedStock,
+            getAppliedStock,
             isServiceCompleted,
             finalizarRuta,
         }}>

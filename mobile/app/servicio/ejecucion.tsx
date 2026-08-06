@@ -31,6 +31,7 @@ import Mustache from 'mustache';
 import { captureRef } from 'react-native-view-shot';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
+import * as ImageManipulator from 'expo-image-manipulator';
 import { PAYWAY_LOGO_BASE64, DISCAR_LOGO_BASE64 } from '../../constants/logo';
 
 // Types
@@ -766,7 +767,12 @@ export default function EjecucionScreen() {
             }
         } catch (stockCheckError) {
             console.warn('Could not validate stock:', stockCheckError);
-            // Don't block if we can't check stock - backend will validate
+            Alert.alert(
+                'Error de Validación',
+                'No se pudo verificar el stock disponible. Por favor intente nuevamente o contacte a su supervisor.',
+                [{ text: 'Entendido' }]
+            );
+            return false;
         }
 
         // Validation 6: Check for already existing serialized items in technician's stock (prevent duplicates)
@@ -934,15 +940,28 @@ export default function EjecucionScreen() {
             await new Promise(resolve => setTimeout(resolve, 300));
 
             const photo = await cameraRef.current.takePictureAsync({
-                quality: 0.7,
+                quality: 0.85,
                 base64: false,
             });
 
             if (photo?.uri) {
+                // Crop to the center strip of the image where the serial label/barcode is.
+                // The scan frame overlay covers approx 80% width × 50% height of the camera area.
+                const cropWidth = Math.round(photo.width * 0.8);
+                const cropHeight = Math.round(photo.height * 0.5);
+                const cropOriginX = Math.round((photo.width - cropWidth) / 2);
+                const cropOriginY = Math.round((photo.height - cropHeight) / 2);
+
+                const cropped = await ImageManipulator.manipulateAsync(
+                    photo.uri,
+                    [{ crop: { originX: cropOriginX, originY: cropOriginY, width: cropWidth, height: cropHeight } }],
+                    { compress: 0.85, format: ImageManipulator.SaveFormat.JPEG }
+                );
+
                 // Save to permanent location
                 const fileName = `serie_${scannerTarget.id}_${Date.now()}.jpg`;
                 const permanentPath = (FileSystem.documentDirectory || '') + fileName;
-                await FileSystem.moveAsync({ from: photo.uri, to: permanentPath });
+                await FileSystem.moveAsync({ from: cropped.uri, to: permanentPath });
 
                 // Update material with photo path
                 updateMaterialPhoto(scannerTarget.type, scannerTarget.id, permanentPath);
@@ -1080,7 +1099,8 @@ export default function EjecucionScreen() {
         itemId: string,
         material: string,
         unidadMedida: string,
-        serieOCantidad: string
+        serieOCantidad: string,
+        condicion?: string
     ) => {
         // Only validate for entregado (deliveries)
         if (type !== 'entregado') {
@@ -1100,22 +1120,25 @@ export default function EjecucionScreen() {
             const stockItems = await db.getStockLocal();
 
             if (unidadMedida === 'SERIALIZADO') {
-                // Check if this exact serial exists in stock
+                // Check if this exact serial exists in stock with matching condition
                 const hasInStock = stockItems.some((s: any) =>
                     s.codigo_material === material &&
-                    s.serie?.toLowerCase() === serieOCantidad.toLowerCase()
+                    s.serie?.toLowerCase() === serieOCantidad.toLowerCase() &&
+                    (!condicion || s.condicion === condicion)
                 );
 
                 if (!hasInStock) {
-                    updateMaterialItem(type, itemId, 'error', `Serie "${serieOCantidad}" no encontrada en su stock para este material`);
+                    const condMsg = condicion && condicion !== 'BUENO' ? ` en condición ${condicion}` : '';
+                    updateMaterialItem(type, itemId, 'error', `Serie "${serieOCantidad}"${condMsg} no encontrada en su stock para este material`);
                 } else {
                     updateMaterialItem(type, itemId, 'error', '');
                 }
             } else {
-                // Check if quantity is available
+                // Check if quantity is available with matching condition
                 const cantidad = parseInt(serieOCantidad) || 0;
                 const stockItem = stockItems.find((s: any) =>
-                    s.codigo_material === material && !s.serie
+                    s.codigo_material === material && !s.serie &&
+                    (!condicion || s.condicion === condicion)
                 );
                 const stockCantidad = stockItem?.cantidad || 0;
 
@@ -1201,7 +1224,7 @@ export default function EjecucionScreen() {
             console.log('Stock movements registered successfully');
         } catch (error) {
             console.error('Error registering stock movements:', error);
-            // Don't block the flow, just log the error
+            throw error;
         }
     };
 
@@ -1457,7 +1480,16 @@ export default function EjecucionScreen() {
             }
 
             // Register stock movements
-            await registerStockMovements();
+            try {
+                await registerStockMovements();
+            } catch (stockError) {
+                console.error('Stock movements failed after saving gestiones:', stockError);
+                Alert.alert(
+                    'Aviso de Stock',
+                    'Las órdenes se guardaron correctamente pero hubo un error al actualizar el stock local. Los movimientos se sincronizarán con el servidor. Contacte a su supervisor si el problema persiste.',
+                    [{ text: 'Entendido' }]
+                );
+            }
 
             // Note: Services are tracked via gestiones with PENDING status
             // No need to mark as completed locally - will be synced to server
@@ -1700,7 +1732,16 @@ export default function EjecucionScreen() {
                 setGeneratedOrderPaths([]);
 
                 // Register stock movements before navigating
-                await registerStockMovements();
+                try {
+                    await registerStockMovements();
+                } catch (stockError) {
+                    console.error('Stock movements failed after saving gestiones:', stockError);
+                    Alert.alert(
+                        'Aviso de Stock',
+                        'El servicio se guardó correctamente pero hubo un error al actualizar el stock local. Los movimientos se sincronizarán con el servidor. Contacte a su supervisor si el problema persiste.',
+                        [{ text: 'Entendido' }]
+                    );
+                }
 
                 // Navigate to detail
                 router.replace({
@@ -2041,7 +2082,7 @@ export default function EjecucionScreen() {
         const items = currentMaterialType === 'retirado' ? formData.material_retirado : formData.material_entregado;
         const item = items.find(i => i.id === currentMaterialId);
         if (item?.serie_o_cantidad && currentMaterialType === 'entregado') {
-            await validateMaterialStock(currentMaterialType, currentMaterialId, mat.codigo_material, mat.unidad_medida, item.serie_o_cantidad);
+            await validateMaterialStock(currentMaterialType, currentMaterialId, mat.codigo_material, mat.unidad_medida, item.serie_o_cantidad, item.condicion);
         }
     };
 
@@ -2391,7 +2432,7 @@ export default function EjecucionScreen() {
                                                                     material: it.codigo_material || '',
                                                                     nombre_material: it.nombre_material || it.codigo_material || '',
                                                                     serie_o_cantidad: it.unidad_medida === 'SERIALIZADO' ? '' : (it.cantidad ? String(it.cantidad) : '1'),
-                                                                    condicion: 'NUEVO',
+                                                                    condicion: 'BUENO',
                                                                     unidad_medida: it.unidad_medida || 'UNIDAD',
                                                                 }));
                                                             setFormData(prev => ({

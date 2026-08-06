@@ -230,9 +230,9 @@ export default function NuevaTransferenciaScreen() {
     // Obtener codigo_base (almacén) del primer item (asumiendo que todos vienen del mismo origen)
     const origenAlmacenId = itemsSeleccionados[0]?.stockItem?.codigo_base || codigoBase || 'DI01';
 
-    // Para simplificar, asumimos que el destino está en el mismo almacén que el origen o usamos el del usuario activo.
-    // En una iteración real, el selector de destino debería traer el `codigo_base` si pertenece a otra zona.
-    const destinoAlmacenId = codigoBase || 'DI01';
+    // Usar la base del DESTINO (no del usuario actual), para que transferencias entre zonas
+    // apunten al almacén correcto del técnico receptor.
+    const destinoAlmacenId = destinoSeleccionado?.codigo_base || codigoBase || 'DI01';
 
     const data: CrearTransferenciaData = {
       origen_almacen_id: origenAlmacenId,
