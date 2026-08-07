@@ -25,6 +25,9 @@ export interface DatabaseService {
     // Plantillas de materiales
     savePlantillasMaterial(plantillas: any[]): Promise<void>;
     getPlantillasMaterial(tipo_incidente?: string, tipo_cierre?: string): Promise<any[]>;
+    saveServiceDraft(key: string, payload: any): Promise<void>;
+    getServiceDraft(key: string): Promise<any | null>;
+    deleteServiceDraft(key: string): Promise<void>;
 }
 
 // Web stub implementation - all methods are no-ops
@@ -94,6 +97,15 @@ class WebDatabaseStub implements DatabaseService {
     }
     async getPlantillasMaterial(_tipo_incidente?: string, _tipo_cierre?: string): Promise<any[]> {
         return [];
+    }
+    async saveServiceDraft(_key: string, _payload: any): Promise<void> {
+        console.log('Database: Web - saveServiceDraft skipped');
+    }
+    async getServiceDraft(_key: string): Promise<any | null> {
+        return null;
+    }
+    async deleteServiceDraft(_key: string): Promise<void> {
+        console.log('Database: Web - deleteServiceDraft skipped');
     }
 }
 

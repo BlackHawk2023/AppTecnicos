@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
-import { Alert } from 'react-native';
+import { Alert, AppState, AppStateStatus } from 'react-native';
 import { RoutesService, RutaResumen, RutaDetalle } from '../services/routes.service';
 import { useAuth } from './AuthContext';
 import { locationService } from '../services/location.service';
@@ -50,7 +50,7 @@ interface RouteContextType {
     appliedStocks: Map<string, AppliedStock>;
     reagendamientos: Map<string, ReagendamientoInfo>;
     fetchRouteData: () => Promise<void>;
-    syncWithBackend: () => Promise<void>;  // For pull-to-refresh
+    syncWithBackend: (options?: { silent?: boolean }) => Promise<void>;  // For pull-to-refresh and automatic retries
     getServiceById: (cita: string, ot: string, partida: number) => any | undefined;
     getServicesByOT: (cita: string, ot: string) => any[];
     updateServiceLocalStatus: (cita: string, ot: string, partida: number, newStatus: string) => void;
@@ -101,6 +101,7 @@ const getServiceKey = (cita: string, ot: string, partida: number) => `${cita}-${
 export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
     const { user } = useAuth();
     const [rutaActiva, setRutaActiva] = useState<RutaResumen | null>(null);
+    const rutaActivaRef = useRef<RutaResumen | null>(null);
     const [servicios, setServicios] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
@@ -133,6 +134,7 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
             if (rutaLocal) {
                 console.log(`RouteContext: Found cached ruta ${rutaLocal.ruta.id}`);
                 setRutaActiva(rutaLocal.ruta);
+                rutaActivaRef.current = rutaLocal.ruta;
                 setHasRoute(true);
 
                 // Start background tracking for existing route
@@ -196,6 +198,7 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
             } else {
                 console.log('RouteContext: No cached route found');
                 setRutaActiva(null);
+                rutaActivaRef.current = null;
                 setServicios([]);
                 setHasRoute(false);
                 setGeneratedOrders(new Map());
@@ -233,8 +236,9 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
     // Sync with backend - called by pull-to-refresh (manual sync)
     // Unified sync logic for both Home and Stock screens
     // correct order: Upload (Movements -> Gestiones -> Locations) -> Finalize -> Download -> Cleanup
-    const syncWithBackend = useCallback(async () => {
+    const syncWithBackend = useCallback(async (options?: { silent?: boolean }) => {
         console.log('RouteContext: syncWithBackend called (manual sync)');
+        const silent = options?.silent === true;
         if (!user) return;
         if (isSyncingRef.current) {
             console.log('RouteContext: Sync already in progress, skipping duplicate call');
@@ -257,6 +261,8 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
             const { createDatabaseService } = await import('../db/database');
             db = createDatabaseService();
             await db.init();
+            const rutaLocalActual = await db.getRutaActiva();
+            const currentRuta = rutaLocalActual?.ruta || rutaActivaRef.current;
 
             // Dynamics import to avoid cycles
             const { syncService } = await import('../services/sync.service');
@@ -364,19 +370,19 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
             let newRuta = null;
 
             // SCENARIO 1: Old route active -> New route from backend (Different ID)
-            if (rutaActiva && hasRemoteRuta && statusData.ruta && statusData.ruta.id !== rutaActiva.id) {
+            if (currentRuta && hasRemoteRuta && statusData.ruta && statusData.ruta.id !== currentRuta.id) {
                 console.log('RouteContext: Route changed! Clearing old, setting new.');
                 await cleanupRouteData(db);
                 newRuta = statusData.ruta;
             }
             // SCENARIO 2: Same route active -> Update details
-            else if (rutaActiva && hasRemoteRuta && statusData.ruta && statusData.ruta.id === rutaActiva.id) {
+            else if (currentRuta && hasRemoteRuta && statusData.ruta && statusData.ruta.id === currentRuta.id) {
                 console.log('RouteContext: Updating existing route details.');
                 // Don't save yet - wait for details
                 newRuta = statusData.ruta;
             }
             // SCENARIO 3: No local route -> No remote route (Idle)
-            else if (!rutaActiva && !hasRemoteRuta) {
+            else if (!currentRuta && !hasRemoteRuta) {
                 console.log('RouteContext: No active route.');
                 // Ensure UI is clear
                 setRutaActiva(null);
@@ -384,16 +390,16 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
                 setHasRoute(false);
             }
             // SCENARIO 4: No local route -> Remote route exists (New login or recovery)
-            else if (!rutaActiva && hasRemoteRuta && statusData.ruta) {
+            else if (!currentRuta && hasRemoteRuta && statusData.ruta) {
                 console.log('RouteContext: Found new route from backend.');
                 // Don't save yet - wait for details
                 newRuta = statusData.ruta;
             }
             // SCENARIO 5: Local route active -> Remote says NO route (Post-finalization or cancellation)
-            else if (rutaActiva && !hasRemoteRuta) {
+            else if (currentRuta && !hasRemoteRuta) {
                 console.log('RouteContext: Local route exists but backend has none.');
                 // If our local route is NOT finalized, it might be a cancellation from backend
-                if (rutaActiva.estado !== 'FINALIZADA') {
+                if (currentRuta.estado !== 'FINALIZADA') {
                     Alert.alert(
                         'Ruta cancelada',
                         'La ruta ha sido cerrada o cancelada desde la central.'
@@ -426,7 +432,7 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
 
                         // NEW: Register RECEPCION location if this is a new assignment (Scenario 1 or 4)
                         // Verify if we didn't have a route before OR if the ID changed
-                        const isNewAssignment = !rutaActiva || (rutaActiva.id !== newRuta.id);
+                        const isNewAssignment = !currentRuta || (currentRuta.id !== newRuta.id);
 
                         if (isNewAssignment) {
                             console.log('RouteContext: Registering RECEPCION location for new/changed route...');
@@ -544,7 +550,7 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
             console.log('RouteContext: Phase 4 Cleanup complete (gestiones preserved for active route).');
 
             // Show success feedback to user
-            if (uploadSuccess && downloadSuccess) {
+            if (!silent && uploadSuccess && downloadSuccess) {
                 let message = '✓ Sincronización completada correctamente.';
                 if (gestionesSynced > 0 || stockMovementsSynced > 0) {
                     const parts = [];
@@ -592,40 +598,38 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
                     });
                 } catch (logErr) { /* ignore */ }
             }
-            Alert.alert('Error de sincronización', 'No se pudo conectar al servidor. Los datos locales se mantienen.');
+            if (!silent) {
+                Alert.alert('Error de sincronización', 'No se pudo conectar al servidor. Los datos locales se mantienen.');
+            }
             // Don't clear local data on sync failure - keep working offline
         } finally {
             isSyncingRef.current = false;
             setRefreshing(false);
         }
-    }, [user, rutaActiva]);
-
-    // Initial load when user changes (login/session restore)
-    // If no local data exists, automatically sync with backend
-    useEffect(() => {
-        if (user) {
-            const loadAndMaybeSyncData = async () => {
-                // First, try to load local data
-                await fetchRouteData();
-
-                // If no local route exists, trigger sync (fresh login or post-logout)
-                // Small delay to ensure fetchRouteData has completed and set hasRoute
-                setTimeout(async () => {
-                    const { createDatabaseService } = await import('../db/database');
-                    const db = createDatabaseService();
-                    await db.init();
-                    const rutaLocal = await db.getRutaActiva();
-
-                    if (!rutaLocal) {
-                        console.log('RouteContext: No local route found, triggering initial sync...');
-                        syncWithBackend();
-                    }
-                }, 100);
-            };
-
-            loadAndMaybeSyncData();
-        }
     }, [user]);
+
+    // Render local data first, then synchronize in the background on every app access.
+    useEffect(() => {
+        if (!user) return;
+        let active = true;
+        const loadAndSync = async () => {
+            await fetchRouteData();
+            if (active) void syncWithBackend({ silent: true });
+        };
+        void loadAndSync();
+        return () => { active = false; };
+    }, [user]);
+
+    useEffect(() => {
+        if (!user) return;
+        let previousState: AppStateStatus = AppState.currentState;
+        const subscription = AppState.addEventListener('change', (nextState) => {
+            const returningToForeground = /inactive|background/.test(previousState) && nextState === 'active';
+            previousState = nextState;
+            if (returningToForeground) void syncWithBackend({ silent: true });
+        });
+        return () => subscription.remove();
+    }, [user, syncWithBackend]);
 
     const getServiceById = (cita: string, ot: string, partida: number) => {
         console.log(`RouteContext: Looking for service. Params: Cita=${cita} OT=${ot} Partida=${partida}`);

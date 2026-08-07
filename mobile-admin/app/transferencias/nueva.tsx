@@ -13,10 +13,11 @@ import {
   Alert,
   ActivityIndicator,
   Platform,
-  Button
+  Button,
+  AppState,
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import { router } from 'expo-router';
+import { router, useNavigation } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useAuth } from '../../contexts/AuthContext';
 import {
@@ -26,6 +27,7 @@ import {
 } from '../../services/transferencias.service';
 import { getStock, getUbicaciones, StockItem, Ubicacion } from '../../services/stock.service';
 import { Colors, Spacing, FontSizes, Shadows, BorderRadius } from '../../constants/theme';
+import { clearTransferenciaDraft, getTransferenciaDraft, saveTransferenciaDraft } from '../../utils/transferencia-draft';
 
 interface ItemSeleccionado {
   stockItem: StockItem;
@@ -34,6 +36,10 @@ interface ItemSeleccionado {
 
 export default function NuevaTransferenciaScreen() {
   const { user, codigoBase } = useAuth();
+  const navigation = useNavigation();
+  const draftUserId = user?.usuario;
+  const draftHydratedRef = useRef(false);
+  const transferCompletedRef = useRef(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
 
@@ -60,7 +66,7 @@ export default function NuevaTransferenciaScreen() {
 
   // Cargar datos iniciales
   useEffect(() => {
-    loadData();
+    void loadData();
   }, []);
 
   // Cargar stock cuando cambia el origen
@@ -115,7 +121,14 @@ export default function NuevaTransferenciaScreen() {
       setUbicaciones(ubicacionesData);
 
       // Si hay una ubicación que coincide con el código base del usuario, pre-seleccionarla como origen
-      if (codigoBase) {
+      const draft = await getTransferenciaDraft(draftUserId);
+      if (draft?.items?.length) {
+        setOrigenSeleccionado(ubicacionesData.find(u => u.id === draft.origenId) ?? null);
+        setDestinoSeleccionado(ubicacionesData.find(u => u.id === draft.destinoId) ?? null);
+        setItemsSeleccionados(draft.items);
+        setComentario(draft.comentario || '');
+        Alert.alert('Borrador recuperado', 'Se restauró la transferencia que estaba en carga.');
+      } else if (codigoBase) {
         const miUbicacion = ubicacionesData.find(u => u.codigo === codigoBase);
         if (miUbicacion) {
           setOrigenSeleccionado(miUbicacion);
@@ -125,9 +138,70 @@ export default function NuevaTransferenciaScreen() {
       console.error('Error cargando datos:', error);
       Alert.alert('Error', 'No se pudieron cargar los datos');
     } finally {
+      draftHydratedRef.current = true;
       setIsLoading(false);
     }
   };
+
+  const persistDraft = async () => {
+    if (!draftHydratedRef.current || transferCompletedRef.current) return;
+    if (itemsSeleccionados.length === 0) {
+      await clearTransferenciaDraft(draftUserId);
+      return;
+    }
+    await saveTransferenciaDraft(draftUserId, {
+      origenId: origenSeleccionado?.id ?? null,
+      destinoId: destinoSeleccionado?.id ?? null,
+      items: itemsSeleccionados,
+      comentario,
+    });
+  };
+
+  const discardDraft = async () => {
+    transferCompletedRef.current = true;
+    await clearTransferenciaDraft(draftUserId);
+  };
+
+  useEffect(() => {
+    if (!draftHydratedRef.current || transferCompletedRef.current) return;
+    const timer = setTimeout(() => {
+      void persistDraft().catch(error => console.warn('No se pudo guardar el borrador de transferencia:', error));
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [origenSeleccionado, destinoSeleccionado, itemsSeleccionados, comentario]);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', state => {
+      if (state === 'inactive' || state === 'background') {
+        void persistDraft().catch(error => console.warn('No se pudo guardar el borrador de transferencia:', error));
+      }
+    });
+    return () => subscription.remove();
+  }, [origenSeleccionado, destinoSeleccionado, itemsSeleccionados, comentario]);
+
+  useEffect(() => {
+    const unsubscribe = navigation.addListener('beforeRemove', event => {
+      if (itemsSeleccionados.length === 0 || transferCompletedRef.current || isSaving) return;
+
+      event.preventDefault();
+      Alert.alert(
+        'Descartar transferencia',
+        'Hay materiales cargados. ¿Está seguro de que desea descartar la transferencia?',
+        [
+          { text: 'Continuar cargando', style: 'cancel' },
+          {
+            text: 'Descartar',
+            style: 'destructive',
+            onPress: async () => {
+              await discardDraft();
+              navigation.dispatch(event.data.action);
+            },
+          },
+        ]
+      );
+    });
+    return unsubscribe;
+  }, [navigation, itemsSeleccionados.length, isSaving]);
 
   const loadStockForOrigin = async () => {
     try {
@@ -257,6 +331,7 @@ export default function NuevaTransferenciaScreen() {
     setIsSaving(true);
     try {
       await crearTransferencia(data);
+      await discardDraft();
 
       Alert.alert(
         'Éxito',

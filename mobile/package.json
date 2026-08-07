@@ -65,5 +65,8 @@
     "eslint-config-expo": "~10.0.0",
     "typescript": "~5.9.2"
   },
+  "overrides": {
+    "react-native": "0.81.5"
+  },
   "private": true
 }

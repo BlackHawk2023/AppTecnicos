@@ -100,7 +100,7 @@ export default function RecibirTransferenciasScreen() {
                     onPress: async () => {
                         setIsProcessing(true);
                         try {
-                            await responderTransferencia(transferencia.id, { accion: 'aceptar' });
+                            await responderTransferencia(transferencia.id, { accion: 'ACEPTAR' });
                             Alert.alert('Éxito', 'Transferencia aceptada');
                             loadTransferencias(false);
                         } catch (error: any) {
@@ -128,7 +128,7 @@ export default function RecibirTransferenciasScreen() {
                     onPress: async () => {
                         setIsProcessing(true);
                         try {
-                            await responderTransferencia(transferencia.id, { accion: 'rechazar' });
+                            await responderTransferencia(transferencia.id, { accion: 'RECHAZAR' });
                             Alert.alert('Éxito', 'Transferencia rechazada');
                             loadTransferencias(false);
                         } catch (error: any) {

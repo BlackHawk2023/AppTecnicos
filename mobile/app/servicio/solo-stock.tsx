@@ -10,6 +10,7 @@ import {
     Platform,
     Modal,
     ActivityIndicator,
+    AppState,
 } from 'react-native';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -35,6 +36,7 @@ interface MaterialItem {
 }
 
 interface PartidaMaterials {
+    tipo_cierre: string;
     material_retirado: MaterialItem[];
     material_entregado: MaterialItem[];
 }
@@ -59,6 +61,9 @@ export default function SoloStockScreen() {
     const insets = useSafeAreaInsets();
 
     const { cita, ot } = params;
+    const draftKey = `service-draft:STOCK:${user?.id || user?.usuario || 'anon'}:${String(cita || '')}:${String(ot || '')}`;
+    const draftHydratedRef = useRef(false);
+    const draftCompletedRef = useRef(false);
 
     // Step: 0 = select partidas, 1 = materials per partida
     const [currentStep, setCurrentStep] = useState(0);
@@ -74,6 +79,7 @@ export default function SoloStockScreen() {
 
     // Current partida form state
     const [formData, setFormData] = useState<PartidaMaterials>({
+        tipo_cierre: '',
         material_retirado: [],
         material_entregado: [],
     });
@@ -92,6 +98,7 @@ export default function SoloStockScreen() {
     const [pickerTarget, setPickerTarget] = useState<{ type: 'retirado' | 'entregado'; id: string } | null>(null);
     const [pickerSearch, setPickerSearch] = useState('');
     const [allMaterials, setAllMaterials] = useState<any[]>([]);
+    const [closureTypes, setClosureTypes] = useState<any[]>([]);
 
     // Mi Stock modal
     const [showMiStockModal, setShowMiStockModal] = useState(false);
@@ -119,11 +126,77 @@ export default function SoloStockScreen() {
                 setCurrentStep(1);
                 setCurrentPartidaIndex(0);
                 const initialMap = new Map<number, PartidaMaterials>();
-                initialMap.set(found[0].partida, { material_retirado: [], material_entregado: [] });
+                initialMap.set(found[0].partida, { tipo_cierre: '', material_retirado: [], material_entregado: [] });
                 setPartidaFormData(initialMap);
             }
         }
     }, [cita, ot, getServicesByOT]);
+
+    useEffect(() => {
+        let active = true;
+        const restoreDraft = async () => {
+            try {
+                if (!cita || !ot) return;
+                const db = await loadDatabaseService();
+                const draft = await db?.getServiceDraft(draftKey);
+                if (active && draft?.flow === 'STOCK') {
+                    setSelectedPartidas(draft.selectedPartidas || []);
+                    setCurrentPartidaIndex(draft.currentPartidaIndex || 0);
+                    setCurrentStep(draft.currentStep || 0);
+                    setPartidaFormData(new Map(draft.partidaFormData || []));
+                    if (draft.formData) setFormData(draft.formData);
+                    Alert.alert('Borrador recuperado', 'Se restauraron los datos que estaban en carga.');
+                }
+            } catch (error) {
+                console.warn('Draft restore error:', error);
+            } finally {
+                draftHydratedRef.current = true;
+            }
+        };
+        void restoreDraft();
+        return () => { active = false; };
+    }, [cita, ot, draftKey]);
+
+    useEffect(() => {
+        const loadClosureTypes = async () => {
+            try {
+                const db = await loadDatabaseService();
+                if (db) setClosureTypes(await db.getClosureTypes());
+            } catch (error) {
+                console.error('Error loading closure types:', error);
+            }
+        };
+        void loadClosureTypes();
+    }, []);
+
+    const persistDraft = async () => {
+        if (!draftHydratedRef.current || draftCompletedRef.current || !cita || !ot) return;
+        const db = await loadDatabaseService();
+        if (!db) return;
+        await db.saveServiceDraft(draftKey, {
+            flow: 'STOCK', currentStep, selectedPartidas, currentPartidaIndex,
+            partidaFormData: Array.from(partidaFormData.entries()), formData,
+        });
+    };
+
+    const clearDraft = async () => {
+        draftCompletedRef.current = true;
+        const db = await loadDatabaseService();
+        if (db) await db.deleteServiceDraft(draftKey);
+    };
+
+    useEffect(() => {
+        if (!draftHydratedRef.current || draftCompletedRef.current) return;
+        const timer = setTimeout(() => { void persistDraft().catch(e => console.warn('Draft save error:', e)); }, 500);
+        return () => clearTimeout(timer);
+    }, [currentStep, selectedPartidas, currentPartidaIndex, partidaFormData, formData]);
+
+    useEffect(() => {
+        const subscription = AppState.addEventListener('change', state => {
+            if (state === 'inactive' || state === 'background') void persistDraft().catch(e => console.warn('Draft background save error:', e));
+        });
+        return () => subscription.remove();
+    }, [currentStep, selectedPartidas, currentPartidaIndex, partidaFormData, formData]);
 
     // Get location
     useEffect(() => {
@@ -164,11 +237,11 @@ export default function SoloStockScreen() {
         if (selectedPartidas.length === 0) return;
         const newFormData = new Map<number, PartidaMaterials>();
         for (const num of selectedPartidas) {
-            newFormData.set(num, { material_retirado: [], material_entregado: [] });
+            newFormData.set(num, { tipo_cierre: '', material_retirado: [], material_entregado: [] });
         }
         setPartidaFormData(newFormData);
         setCurrentPartidaIndex(0);
-        setFormData({ material_retirado: [], material_entregado: [] });
+        setFormData({ tipo_cierre: '', material_retirado: [], material_entregado: [] });
         setCurrentStep(1);
     };
 
@@ -177,6 +250,7 @@ export default function SoloStockScreen() {
         setPartidaFormData(prev => {
             const m = new Map(prev);
             m.set(partidaNum, {
+                tipo_cierre: formData.tipo_cierre,
                 material_retirado: formData.material_retirado.filter(i => i.material && i.serie_o_cantidad),
                 material_entregado: formData.material_entregado.filter(i => i.material && i.serie_o_cantidad),
             });
@@ -187,7 +261,7 @@ export default function SoloStockScreen() {
     const loadPartidaData = (index: number) => {
         const num = selectedPartidas[index];
         const saved = partidaFormData.get(num);
-        setFormData(saved || { material_retirado: [], material_entregado: [] });
+        setFormData(saved || { tipo_cierre: '', material_retirado: [], material_entregado: [] });
     };
 
     // Material state helpers
@@ -603,6 +677,10 @@ export default function SoloStockScreen() {
     };
 
     const handleNext = async () => {
+        if (!formData.tipo_cierre?.trim()) {
+            Alert.alert('Tipo de cierre requerido', 'Seleccione un tipo de cierre antes de continuar.');
+            return;
+        }
         const isValid = await validateMaterials();
         if (!isValid) return;
 
@@ -628,6 +706,7 @@ export default function SoloStockScreen() {
             const finalFormData = new Map(partidaFormData);
             const currentPartidaNum = selectedPartidas[currentPartidaIndex];
             finalFormData.set(currentPartidaNum, {
+                tipo_cierre: formData.tipo_cierre,
                 material_retirado: formData.material_retirado.filter(i => i.material && i.serie_o_cantidad),
                 material_entregado: formData.material_entregado.filter(i => i.material && i.serie_o_cantidad),
             });
@@ -643,6 +722,7 @@ export default function SoloStockScreen() {
                     cita: cita as string,
                     ot: ot as string,
                     partida: partidaNum,
+                    tipo_cierre: data?.tipo_cierre || '',
                     material_retirado: JSON.stringify(data?.material_retirado || []),
                     material_entregado: JSON.stringify(data?.material_entregado || []),
                     latitude: location?.coords.latitude ?? null,
@@ -657,6 +737,7 @@ export default function SoloStockScreen() {
                 });
             }
 
+            await clearDraft();
             router.replace('/(tabs)/home');
         } catch (error) {
             console.error('Error saving stock gestión:', error);
@@ -896,6 +977,29 @@ export default function SoloStockScreen() {
                 <Text style={[styles.stepSubtitle, { fontSize: 14 * textScale }]}>
                     Registre los materiales retirados y entregados
                 </Text>
+
+                <View style={styles.materialSection}>
+                    <Text style={[styles.materialTitle, { fontSize: 16 * textScale }]}>Tipo de Cierre *</Text>
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 8 }}>
+                        {closureTypes.map(ct => (
+                            <TouchableOpacity
+                                key={ct.id}
+                                style={[
+                                    styles.estadoChip,
+                                    formData.tipo_cierre === ct.subestado && { backgroundColor: '#3498db', borderColor: '#3498db' },
+                                ]}
+                                onPress={() => setFormData(prev => ({ ...prev, tipo_cierre: ct.subestado }))}
+                            >
+                                <Text style={[styles.estadoChipText, formData.tipo_cierre === ct.subestado && styles.estadoChipTextSelected]}>
+                                    {ct.subestado}
+                                </Text>
+                            </TouchableOpacity>
+                        ))}
+                    </ScrollView>
+                    {closureTypes.length === 0 && (
+                        <Text style={styles.emptyText}>Sin tipos de cierre disponibles. Sincronice la aplicación e intente nuevamente.</Text>
+                    )}
+                </View>
 
                 {renderMaterialSection('retirado', formData.material_retirado)}
                 {renderMaterialSection('entregado', formData.material_entregado)}

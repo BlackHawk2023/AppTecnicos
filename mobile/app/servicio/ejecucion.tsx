@@ -12,6 +12,7 @@ import {
     ActivityIndicator,
     Image,
     KeyboardAvoidingView,
+    AppState,
 } from 'react-native';
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
@@ -92,6 +93,9 @@ export default function EjecucionScreen() {
     const insets = useSafeAreaInsets();
 
     const { cita, ot } = params;
+    const draftKey = `service-draft:ORDEN:${user?.id || user?.usuario || 'anon'}:${String(cita || '')}:${String(ot || '')}`;
+    const draftHydratedRef = useRef(false);
+    const draftCompletedRef = useRef(false);
 
     // Step management: 0=select partidas, 1=client data, 2=informe técnico (loop per partida), 3=materials (loop per partida), 4=signatures
     const [currentStep, setCurrentStep] = useState(0);
@@ -409,13 +413,56 @@ export default function EjecucionScreen() {
                         tecnico_firma: profile.signature_path || ''
                     }));
                 }
+
+                const draft = await db.getServiceDraft(draftKey);
+                if (draft?.flow === 'ORDEN') {
+                    setSelectedPartidas(draft.selectedPartidas || []);
+                    setCurrentPartidaIndex(draft.currentPartidaIndex || 0);
+                    setCurrentStep(draft.currentStep || 0);
+                    setPartidaFormData(new Map(draft.partidaFormData || []));
+                    if (draft.formData) setFormData(draft.formData);
+                    setGeneratedOrderPaths(draft.generatedOrderPaths || []);
+                    setUploadedOrderPhotos(new Map(draft.uploadedOrderPhotos || []));
+                    Alert.alert('Borrador recuperado', 'Se restauraron los datos que estaban en carga.');
+                }
             }
         } catch (error) {
             console.error('Error loading data:', error);
         } finally {
+            draftHydratedRef.current = true;
             setIsLoading(false);
         }
     };
+
+    const persistDraft = async () => {
+        if (!draftHydratedRef.current || draftCompletedRef.current || !cita || !ot) return;
+        const db = await loadDatabaseService();
+        if (!db) return;
+        await db.saveServiceDraft(draftKey, {
+            flow: 'ORDEN', currentStep, selectedPartidas, currentPartidaIndex,
+            partidaFormData: Array.from(partidaFormData.entries()), formData,
+            generatedOrderPaths, uploadedOrderPhotos: Array.from(uploadedOrderPhotos.entries()),
+        });
+    };
+
+    const clearDraft = async () => {
+        draftCompletedRef.current = true;
+        const db = await loadDatabaseService();
+        if (db) await db.deleteServiceDraft(draftKey);
+    };
+
+    useEffect(() => {
+        if (!draftHydratedRef.current || draftCompletedRef.current) return;
+        const timer = setTimeout(() => { void persistDraft().catch(e => console.warn('Draft save error:', e)); }, 500);
+        return () => clearTimeout(timer);
+    }, [currentStep, selectedPartidas, currentPartidaIndex, partidaFormData, formData, generatedOrderPaths, uploadedOrderPhotos]);
+
+    useEffect(() => {
+        const subscription = AppState.addEventListener('change', state => {
+            if (state === 'inactive' || state === 'background') void persistDraft().catch(e => console.warn('Draft background save error:', e));
+        });
+        return () => subscription.remove();
+    }, [currentStep, selectedPartidas, currentPartidaIndex, partidaFormData, formData, generatedOrderPaths, uploadedOrderPhotos]);
 
     // Save current partida form data before moving on
     const saveCurrentPartidaData = () => {
@@ -456,6 +503,13 @@ export default function EjecucionScreen() {
     };
 
     const handleNext = async () => {
+        // A closing type is required before material templates can be evaluated
+        // and before an order can progress to the materials step.
+        if (currentStep === 2 && !formData.tipo_cierre?.trim()) {
+            Alert.alert('Tipo de cierre requerido', 'Seleccione un tipo de cierre antes de continuar.');
+            return;
+        }
+
         // Step 3 -> validate materials before proceeding
         if (currentStep === 3) {
             // Validate materials first (async - checks stock)
@@ -1493,6 +1547,7 @@ export default function EjecucionScreen() {
 
             // Note: Services are tracked via gestiones with PENDING status
             // No need to mark as completed locally - will be synced to server
+            await clearDraft();
 
             Alert.alert(
                 'Órdenes Cargadas',
@@ -1744,6 +1799,7 @@ export default function EjecucionScreen() {
                 }
 
                 // Navigate to detail
+                await clearDraft();
                 router.replace({
                     pathname: '/detalle' as any,
                     params: { cita, ot }

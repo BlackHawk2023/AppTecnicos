@@ -79,6 +79,10 @@ export interface DatabaseService {
     // Stock sync idempotency
     getOrCreateStockBatchId(): Promise<string>;
     clearStockBatchId(): Promise<void>;
+    // Borradores recuperables de flujos de servicio
+    saveServiceDraft(key: string, payload: any): Promise<void>;
+    getServiceDraft(key: string): Promise<any | null>;
+    deleteServiceDraft(key: string): Promise<void>;
 }
 
 // Type for saving a new gestion
@@ -647,6 +651,14 @@ class DatabaseServiceImpl implements DatabaseService {
             CREATE TABLE IF NOT EXISTS app_settings (
                 key TEXT PRIMARY KEY,
                 value TEXT
+            );
+        `);
+
+        await db.execAsync(`
+            CREATE TABLE IF NOT EXISTS workflow_drafts (
+                key TEXT PRIMARY KEY,
+                payload TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
             );
         `);
 
@@ -1466,6 +1478,35 @@ class DatabaseServiceImpl implements DatabaseService {
         console.log('DatabaseService: Cleared stock_batch_id');
     }
 
+    async saveServiceDraft(key: string, payload: any): Promise<void> {
+        const db = await this.getDb();
+        await db.runAsync(
+            `INSERT OR REPLACE INTO workflow_drafts (key, payload, updated_at) VALUES (?, ?, ?)`,
+            [key, JSON.stringify(payload), Date.now()]
+        );
+    }
+
+    async getServiceDraft(key: string): Promise<any | null> {
+        const db = await this.getDb();
+        const row: any = await db.getFirstAsync(
+            `SELECT payload FROM workflow_drafts WHERE key = ?`,
+            [key]
+        );
+        if (!row?.payload) return null;
+        try {
+            return JSON.parse(row.payload);
+        } catch (error) {
+            console.warn('DatabaseService: Invalid service draft, deleting it', error);
+            await this.deleteServiceDraft(key);
+            return null;
+        }
+    }
+
+    async deleteServiceDraft(key: string): Promise<void> {
+        const db = await this.getDb();
+        await db.runAsync(`DELETE FROM workflow_drafts WHERE key = ?`, [key]);
+    }
+
     async getLastSyncLogs(limit: number = 10): Promise<SyncLogEntry[]> {
         const db = await this.getDb();
         return await db.getAllAsync(
@@ -1514,4 +1555,3 @@ export const getDatabaseService = (): DatabaseService | null => {
 };
 
 export const dbService = new DatabaseServiceImpl();
-

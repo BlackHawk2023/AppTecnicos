@@ -229,7 +229,9 @@ export default function HomeScreen() {
                     </View>
                     <View style={styles.infoRow}>
                         <Ionicons name="location-outline" size={16} color="#aaa" />
-                        <Text style={styles.infoText} numberOfLines={1}>{group.domicilio}</Text>
+                        <Text style={styles.infoText} numberOfLines={1}>
+                            {group.localidad ? `${group.domicilio} · ${group.localidad}` : group.domicilio}
+                        </Text>
                     </View>
                     <View style={styles.infoRow}>
                         <Ionicons name="time-outline" size={16} color="#aaa" />
