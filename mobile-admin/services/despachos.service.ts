@@ -35,6 +35,7 @@ export interface Despacho {
     almacen_id: string;
     estado: 'EN_PROGRESO' | 'SOLICITADO' | 'CERRADO' | 'CANCELADO';
     numero_remito: string | null;
+    numero_delivery: string | null;
     tiene_foto_remito: boolean;
     observaciones: string | null;
     fecha_creacion: string;
@@ -53,6 +54,7 @@ export interface DespachoListItem {
     almacen_id: string;
     estado: string;
     numero_remito: string | null;
+    numero_delivery: string | null;
     fecha_creacion: string;
     total_cajas: number;
     cajas_abiertas: number;

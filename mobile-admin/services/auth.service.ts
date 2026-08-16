@@ -44,13 +44,17 @@ export interface ZonaInfo {
 
 /**
  * Login del encargado
- * Usa el endpoint general /auth/login ya que los encargados no son técnicos
+ * Usa el endpoint general /auth/login ya que los encargados no son técnicos.
+ * Envía X-App-Id: stock-admin para que el backend valide acceso_app_stock
+ * (independiente del acceso web).
  */
 export async function login(usuario: string, password: string): Promise<LoginResponse> {
   const client = await getApiClient();
   const response = await client.post<LoginResponse>('/auth/login', {
     username: usuario,
     password,
+  }, {
+    headers: { 'X-App-Id': 'stock-admin' },
   });
   return response.data;
 }

@@ -3,12 +3,18 @@ import { View, Text, StyleSheet, FlatList, TouchableOpacity, ActivityIndicator }
 import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
 import { RoutesService } from '../../services/routes.service';
 import { StatusBar } from 'expo-status-bar';
+import { Ionicons } from '@expo/vector-icons';
+import ServicioPrevioModal from '../../components/ServicioPrevioModal';
 
 export default function RutaDetailScreen() {
     const { id } = useLocalSearchParams();
     const router = useRouter();
     const [loading, setLoading] = useState(true);
     const [rutaFull, setRutaFull] = useState<any | null>(null);
+
+    // Servicio previo (misma terminal) modal state
+    const [previoVisible, setPrevioVisible] = useState(false);
+    const [previoServicio, setPrevioServicio] = useState<any>(null);
 
     useEffect(() => {
         if (id) {
@@ -47,9 +53,9 @@ export default function RutaDetailScreen() {
             <TouchableOpacity
                 style={styles.card}
                 onPress={() => {
-                    // Navigate to detailed service view (composite key)
+                    // Navigate to detailed service view (detalle.tsx obtiene todas las partidas de la OT)
                     router.push({
-                        pathname: "/servicio/detalle",
+                        pathname: "/detalle",
                         params: {
                             cita: item.cita,
                             ot: item.ot,
@@ -80,6 +86,16 @@ export default function RutaDetailScreen() {
                 <View style={styles.row}>
                     <Text style={styles.label}>Incidencia:</Text>
                     <Text style={styles.value} numberOfLines={1}>{item.tipo_incidente}</Text>
+                </View>
+
+                <View style={styles.cardFooter}>
+                    <TouchableOpacity
+                        style={styles.previoButton}
+                        onPress={() => { setPrevioServicio(item); setPrevioVisible(true); }}
+                    >
+                        <Ionicons name="information-circle-outline" size={18} color="#3498db" />
+                        <Text style={styles.previoButtonText}>Servicio previo</Text>
+                    </TouchableOpacity>
                 </View>
             </TouchableOpacity>
         );
@@ -122,6 +138,15 @@ export default function RutaDetailScreen() {
                         </Text>
                     </View>
                 }
+            />
+
+            {/* Servicio previo (misma terminal) */}
+            <ServicioPrevioModal
+                visible={previoVisible}
+                onClose={() => setPrevioVisible(false)}
+                serviciosPrevios={previoServicio?.servicios_previos || []}
+                terminal={previoServicio?.terminal}
+                contextLabel={previoServicio ? `OT ${previoServicio.ot} · Partida N° ${previoServicio.partida}` : undefined}
             />
         </View>
     );
@@ -186,6 +211,25 @@ const styles = StyleSheet.create({
         color: '#ddd',
         flex: 1,
         fontSize: 14,
+    },
+    cardFooter: {
+        flexDirection: 'row',
+        justifyContent: 'flex-end',
+        marginTop: 10,
+        paddingTop: 10,
+        borderTopWidth: 1,
+        borderTopColor: '#2a2a2a',
+    },
+    previoButton: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 6,
+        padding: 6,
+    },
+    previoButtonText: {
+        color: '#3498db',
+        fontSize: 13,
+        fontWeight: '600',
     },
     emptyContainer: {
         padding: 40,

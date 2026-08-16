@@ -47,7 +47,8 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
         const firstSegment = String(segments[0] || '');
         const inAuthGroup = firstSegment === '(tabs)';
-        const isOnLoginPage = segments.length === 0 || firstSegment === 'index' || firstSegment === '';
+        // firstSegment es '' exactamente cuando no hay segmentos (segments.length === 0)
+        const isOnLoginPage = firstSegment === '' || firstSegment === 'index';
         const isOnProtectedRoute = firstSegment === 'detalle' || firstSegment === 'ruta' || inAuthGroup;
 
         if (!user && isOnProtectedRoute) {

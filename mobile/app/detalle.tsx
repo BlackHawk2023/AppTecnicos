@@ -6,6 +6,7 @@ import { useRoute } from '../contexts/RouteContext';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { NotificacionesAppModal } from '../components/NotificacionesAppModal';
+import ServicioPrevioModal from '../components/ServicioPrevioModal';
 import { createDatabaseService } from '../db/database';
 import type { AppNotificacion } from '../db/database';
 
@@ -42,6 +43,12 @@ export default function ServiceDetailScreen() {
         visible: boolean;
         items: AppNotificacion[];
     }>({ visible: false, items: [] });
+
+    // Servicio previo (misma terminal) modal state
+    const [previoModal, setPrevioModal] = useState<{
+        visible: boolean;
+        partida: any | null;
+    }>({ visible: false, partida: null });
     // Prevenir re-apertura en la misma sesión
     const notificacionesYaMostradas = useRef(false);
 
@@ -308,6 +315,15 @@ export default function ServiceDetailScreen() {
                         </TouchableOpacity>
                     )}
                 </View>
+
+                {/* Servicio previo (misma terminal) */}
+                <TouchableOpacity
+                    style={styles.previoButton}
+                    onPress={() => setPrevioModal({ visible: true, partida: p })}
+                >
+                    <Ionicons name="information-circle-outline" size={18} color="#3498db" />
+                    <Text style={styles.previoButtonText}>Ver servicio previo</Text>
+                </TouchableOpacity>
             </View>
         );
     };
@@ -531,6 +547,15 @@ export default function ServiceDetailScreen() {
                     visible={notifModal.visible}
                     notificaciones={notifModal.items}
                     onClose={() => setNotifModal({ visible: false, items: [] })}
+                />
+
+                {/* Servicio previo (misma terminal) */}
+                <ServicioPrevioModal
+                    visible={previoModal.visible}
+                    onClose={() => setPrevioModal({ visible: false, partida: null })}
+                    serviciosPrevios={previoModal.partida?.servicios_previos || []}
+                    terminal={previoModal.partida?.terminal}
+                    contextLabel={previoModal.partida ? `OT ${previoModal.partida.ot} · Partida N° ${previoModal.partida.partida}` : undefined}
                 />
             </ScrollView>
         );
@@ -1028,6 +1053,22 @@ const styles = StyleSheet.create({
     },
     partidaInfoText: {
         color: '#fff',
+        fontSize: 14,
+        fontWeight: '600',
+    },
+    previoButton: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 6,
+        borderWidth: 1,
+        borderColor: '#3498db',
+        borderRadius: 8,
+        padding: 10,
+        marginTop: 12,
+    },
+    previoButtonText: {
+        color: '#3498db',
         fontSize: 14,
         fontWeight: '600',
     },

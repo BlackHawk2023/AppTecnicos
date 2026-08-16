@@ -53,6 +53,7 @@ interface RouteContextType {
     syncWithBackend: (options?: { silent?: boolean }) => Promise<void>;  // For pull-to-refresh and automatic retries
     getServiceById: (cita: string, ot: string, partida: number) => any | undefined;
     getServicesByOT: (cita: string, ot: string) => any[];
+    getServiciosPrevios: (cita: string, ot: string, partida: number) => any[];
     updateServiceLocalStatus: (cita: string, ot: string, partida: number, newStatus: string) => void;
     setGeneratedOrder: (cita: string, ot: string, partida: number, orderInfo: GeneratedOrder) => void;
     getGeneratedOrder: (cita: string, ot: string, partida: number) => GeneratedOrder | undefined;
@@ -80,6 +81,7 @@ const RouteContext = createContext<RouteContextType>({
     syncWithBackend: async () => { },
     getServiceById: () => undefined,
     getServicesByOT: () => [],
+    getServiciosPrevios: () => [],
     updateServiceLocalStatus: () => { },
     setGeneratedOrder: () => { },
     getGeneratedOrder: () => undefined,
@@ -222,7 +224,7 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
         }
 
         try {
-            const FileSystem = await import('expo-file-system');
+            const FileSystem = await import('expo-file-system/legacy');
             const ordenesDir = `${FileSystem.documentDirectory}ordenes/`;
             const dirInfo = await FileSystem.getInfoAsync(ordenesDir);
             if (dirInfo.exists) {
@@ -645,6 +647,12 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
         return servicios.filter(s => s.cita == cita && s.ot == ot);
     };
 
+    // Servicios previos sincronizados (último servicio de la misma terminal) para la partida
+    const getServiciosPrevios = (cita: string, ot: string, partida: number) => {
+        const service = getServiceById(cita, ot, partida);
+        return service?.servicios_previos ?? [];
+    };
+
     // Update local status (not synced to backend - internal use only)
     const updateServiceLocalStatus = (cita: string, ot: string, partida: number, newStatus: string) => {
         setServicios(prev => prev.map(s => {
@@ -819,6 +827,7 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
             syncWithBackend,
             getServiceById,
             getServicesByOT,
+            getServiciosPrevios,
             updateServiceLocalStatus,
             setGeneratedOrder,
             getGeneratedOrder,

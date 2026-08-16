@@ -9,6 +9,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ServerConfigService } from '../../services/serverConfig.service';
 import { resetApi, initializeApi } from '../../services/api.service';
+import Constants from 'expo-constants';
 
 // Lazy load database for native only
 let databaseService: any = null;
@@ -288,7 +289,7 @@ export default function PerfilScreen() {
                 <View style={styles.divider} />
                 <View style={styles.infoRow}>
                     <Text style={styles.label}>Versión App:</Text>
-                    <Text style={styles.value}>2.1.1</Text>
+                    <Text style={styles.value}>{Constants.expoConfig?.version || '2.3.1'}</Text>
                 </View>
             </View>
 

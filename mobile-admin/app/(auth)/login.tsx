@@ -88,7 +88,20 @@ export default function LoginScreen() {
       await authLogin(username.trim(), password);
     } catch (error: any) {
       console.error('Error de autenticación:', error?.response?.status, error?.message);
-      Alert.alert('Error', 'Usuario o contraseña incorrectos');
+      // Acceso a la app deshabilitado (backend responde 403 ACCESS_DISABLED)
+      const isAccessDisabled =
+        error?.response?.status === 403 &&
+        (error?.response?.data?.detail?.code === 'ACCESS_DISABLED' ||
+          (typeof error?.response?.data?.detail === 'string' &&
+            error.response.data.detail.includes('deshabilitado')));
+      if (isAccessDisabled) {
+        Alert.alert(
+          'Acceso deshabilitado',
+          'El acceso a la app de administración de stock está deshabilitado para este usuario. Contacte a un administrador.'
+        );
+      } else {
+        Alert.alert('Error', 'Usuario o contraseña incorrectos');
+      }
     } finally {
       setIsLoading(false);
     }
