@@ -7,7 +7,10 @@ export type {
     GestionData,
     GestionRecord,
     StockLocalItem,
+    AuditoriaCampoLocal,
     MovimientoPendiente,
+    NuevaOperacionPendiente,
+    OperacionPendiente,
     AppNotificacion
 } from './database.native';
 

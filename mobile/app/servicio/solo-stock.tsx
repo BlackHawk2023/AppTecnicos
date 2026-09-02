@@ -53,6 +53,16 @@ const loadDatabaseService = async () => {
     return databaseService;
 };
 
+/** UUID v4 sin dependencias externas (usa crypto aleatorio del runtime) */
+function generateUUIDv4(): string {
+    const bytes = new Uint8Array(16);
+    for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 1
+    const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 export default function SoloStockScreen() {
     const params = useLocalSearchParams();
     const router = useRouter();
@@ -69,6 +79,8 @@ export default function SoloStockScreen() {
     // Step: 0 = select partidas, 1 = materials per partida
     const [currentStep, setCurrentStep] = useState(0);
     const [isSaving, setIsSaving] = useState(false);
+    // Guard anti doble-tap: bloquea handleConfirm hasta terminar el save local.
+    const submittingRef = useRef(false);
 
     // Cliente (obligatorio para registrar stock, igual que generar orden)
     const [clienteNombre, setClienteNombre] = useState('');
@@ -425,6 +437,30 @@ export default function SoloStockScreen() {
         setScannerTarget(null);
     };
 
+    // Mensaje de error accionable para entregas serializadas: si la serie NO está
+    // bajo el material seleccionado PERO sí está en el stock bajo otro código
+    // (p.ej. una SIM cargada con otro operador), se le indica al técnico cuál es
+    // el material correcto en lugar de un genérico "no encontrada".
+    // Retorna '' cuando la serie está disponible bajo ese material y condición.
+    const getSerieEntregaError = (stockItems: any[], material: string, serie: string, condicion?: string): string => {
+        const serieLower = (serie || '').toLowerCase();
+        if (!serieLower) return '';
+        const enEsteMaterial = stockItems.find((s: any) =>
+            s.codigo_material === material && s.serie?.toLowerCase() === serieLower
+        );
+        if (enEsteMaterial) {
+            if (condicion && enEsteMaterial.condicion !== condicion) {
+                return `La serie "${serie}" está en su stock en condición ${enEsteMaterial.condicion}, no en ${condicion}.`;
+            }
+            return '';
+        }
+        const enOtroMaterial = stockItems.find((s: any) => s.serie?.toLowerCase() === serieLower);
+        if (enOtroMaterial) {
+            return `La serie "${serie}" está en su stock como ${enOtroMaterial.codigo_material} - ${enOtroMaterial.nombre_material || enOtroMaterial.codigo_material}. Seleccione ese material para poder entregarla.`;
+        }
+        return `Serie "${serie}" no encontrada en su stock`;
+    };
+
     // Lookup serial in stock on blur
     const lookupSerialInStock = async (type: 'retirado' | 'entregado', itemId: string, inputValue: string) => {
         if (!inputValue) { updateMaterialItem(type, itemId, 'error', ''); return; }
@@ -446,8 +482,7 @@ export default function SoloStockScreen() {
                     return;
                 }
                 if (item.unidad_medida === 'SERIALIZADO' && type === 'entregado') {
-                    const has = stockItems.some((s: any) => s.codigo_material === item.material && s.serie?.toLowerCase() === inputValue.toLowerCase());
-                    updateMaterialItem(type, itemId, 'error', !has ? `Serie "${inputValue}" no encontrada en su stock` : '');
+                    updateMaterialItem(type, itemId, 'error', getSerieEntregaError(stockItems, item.material, inputValue));
                     return;
                 }
                 updateMaterialItem(type, itemId, 'error', '');
@@ -582,6 +617,29 @@ export default function SoloStockScreen() {
             return false;
         }
 
+        // Check duplicates in retirado (espejo del check de entregado): el backend
+        // rechaza el segundo retiro como PENDIENTE, pero evitamos cargar una gestión
+        // que quedaría incompleta.
+        const serializedRetirados = formData.material_retirado.filter(m => m.unidad_medida === 'SERIALIZADO' && m.serie_o_cantidad);
+        const seenRetirados = new Set<string>();
+        const dupesRetirados: string[] = [];
+        for (const item of serializedRetirados) {
+            const key = item.serie_o_cantidad.toLowerCase();
+            if (seenRetirados.has(key)) dupesRetirados.push(item.serie_o_cantidad);
+            else seenRetirados.add(key);
+        }
+        if (dupesRetirados.length > 0) {
+            Alert.alert('Seriales Duplicados', `Seriales duplicados en Material Retirado: ${dupesRetirados.join(', ')}.`, [{ text: 'Revisar' }]);
+            return false;
+        }
+
+        // Un mismo serial no puede estar simultáneamente en retirado y entregado
+        const enAmbos = [...seenRetirados].filter(s => seen.has(s));
+        if (enAmbos.length > 0) {
+            Alert.alert('Serial Duplicado', `El serial "${enAmbos.join('", "')}" está cargado en Material Retirado y Material Entregado. Retirar y entregar el mismo serial en una misma gestión no es válido.`, [{ text: 'Revisar' }]);
+            return false;
+        }
+
         // Stock check
         try {
             const db = await loadDatabaseService();
@@ -595,7 +653,18 @@ export default function SoloStockScreen() {
                         s.serie?.toLowerCase() === item.serie_o_cantidad.toLowerCase() &&
                         s.condicion === item.condicion
                     );
-                    if (!has) notInStock.push(`${item.material} (${item.serie_o_cantidad})`);
+                    if (!has) {
+                        // Hint accionable: si la serie está bajo otro material, se lo decimos.
+                        const enOtro = stockItems.find((s: any) =>
+                            s.serie?.toLowerCase() === item.serie_o_cantidad.toLowerCase() &&
+                            s.codigo_material !== item.material
+                        );
+                        if (enOtro) {
+                            notInStock.push(`${item.material} (${item.serie_o_cantidad}): la serie está en su stock como ${enOtro.codigo_material} - ${enOtro.nombre_material}. Seleccione ese material.`);
+                        } else {
+                            notInStock.push(`${item.material} (${item.serie_o_cantidad})`);
+                        }
+                    }
                 }
 
                 const nonSerial = formData.material_entregado.filter(m => m.unidad_medida !== 'SERIALIZADO' && m.material && m.serie_o_cantidad);
@@ -634,19 +703,27 @@ export default function SoloStockScreen() {
         return true;
     };
 
-    // Register stock movements for all partidas
-    const registerStockMovements = async (finalFormData: Map<number, PartidaMaterials>) => {
-        const db = await loadDatabaseService();
-        if (!db) return;
+    // ==================== OUTBOX TRANSACCIONAL ====================
+    // Genera UNA operación por partida con UUIDs estables (operación + movimientos).
+    // Los UUIDs se generan una sola vez por sesión del formulario y se reutilizan
+    // en reintentos, de modo que el backend deduplique por (tecnico, operacion_uuid)
+    // y (tecnico, movimiento_uuid).
+    const operacionesRef = useRef<any[] | null>(null);
+
+    const buildOperaciones = (finalFormData: Map<number, PartidaMaterials>): any[] => {
+        const timestamp = new Date().toISOString();
+        const operaciones: any[] = [];
 
         for (const partidaNum of selectedPartidas) {
             const data = finalFormData.get(partidaNum);
             if (!data) continue;
 
+            const movimientos: any[] = [];
             for (const item of data.material_retirado || []) {
                 if (item.material && item.serie_o_cantidad) {
                     const isSerialized = item.unidad_medida === 'SERIALIZADO';
-                    await db.addMovimientoPendiente({
+                    movimientos.push({
+                        uuid: generateUUIDv4(),
                         codigo_material: item.material,
                         serie: isSerialized ? item.serie_o_cantidad : null,
                         cantidad: isSerialized ? 1 : parseInt(item.serie_o_cantidad) || 1,
@@ -655,23 +732,16 @@ export default function SoloStockScreen() {
                         ot: ot as string,
                         partida: partidaNum,
                         foto_serie: item.foto_serie || null,
-                        fecha_hora: new Date().toISOString(),
+                        fecha_hora: timestamp,
                         condicion: item.condicion,
                     });
-                    await db.updateStockLocal(
-                        item.material,
-                        isSerialized ? item.serie_o_cantidad : null,
-                        isSerialized ? 1 : parseInt(item.serie_o_cantidad) || 1,
-                        'add',
-                        item.condicion
-                    );
                 }
             }
-
             for (const item of data.material_entregado || []) {
                 if (item.material && item.serie_o_cantidad) {
                     const isSerialized = item.unidad_medida === 'SERIALIZADO';
-                    await db.addMovimientoPendiente({
+                    movimientos.push({
+                        uuid: generateUUIDv4(),
                         codigo_material: item.material,
                         serie: isSerialized ? item.serie_o_cantidad : null,
                         cantidad: isSerialized ? 1 : parseInt(item.serie_o_cantidad) || 1,
@@ -680,19 +750,40 @@ export default function SoloStockScreen() {
                         ot: ot as string,
                         partida: partidaNum,
                         foto_serie: item.foto_serie || null,
-                        fecha_hora: new Date().toISOString(),
+                        fecha_hora: timestamp,
                         condicion: item.condicion,
                     });
-                    await db.updateStockLocal(
-                        item.material,
-                        isSerialized ? item.serie_o_cantidad : null,
-                        isSerialized ? 1 : parseInt(item.serie_o_cantidad) || 1,
-                        'remove',
-                        item.condicion
-                    );
                 }
             }
+
+            const gestion = {
+                terminal: '',
+                tipo_cierre: data.tipo_cierre || '',
+                detalle_trabajo: null,
+                observaciones: null,
+                material_retirado: data.material_retirado || [],
+                material_entregado: data.material_entregado || [],
+                cliente_nombre: clienteNombre.trim(),
+                cliente_dni: clienteDni.trim(),
+                firma_cliente: null,
+                firma_tecnico: null,
+                latitud: location?.coords.latitude ?? null,
+                longitud: location?.coords.longitude ?? null,
+            };
+
+            operaciones.push({
+                operacion_uuid: generateUUIDv4(),
+                tipo_gestion: 'STOCK',
+                cita: cita as string,
+                ot: ot as string,
+                partida: partidaNum,
+                fecha_hora_creacion: timestamp,
+                gestion,
+                movimientos,
+            });
         }
+
+        return operaciones;
     };
 
     const handleNext = async () => {
@@ -720,6 +811,12 @@ export default function SoloStockScreen() {
     };
 
     const handleConfirm = async () => {
+        // Guard anti doble-tap: no duplicar operaciones si el botón se toca 2 veces.
+        if (submittingRef.current) {
+            console.log('SoloStock: Confirmación ya en curso, ignorando doble toque');
+            return;
+        }
+        submittingRef.current = true;
         setIsSaving(true);
         try {
             const db = await loadDatabaseService();
@@ -734,27 +831,78 @@ export default function SoloStockScreen() {
                 material_entregado: formData.material_entregado.filter(i => i.material && i.serie_o_cantidad),
             });
 
-            await registerStockMovements(finalFormData);
+            // Construir operaciones UNA sola vez (UUIDs estables en reintentos).
+            if (!operacionesRef.current) {
+                operacionesRef.current = buildOperaciones(finalFormData);
+            }
+            const operaciones = operacionesRef.current;
+            if (operaciones.length === 0) {
+                Alert.alert('Error', 'No hay movimientos de stock que registrar.');
+                return;
+            }
 
             const timestamp = new Date().toISOString();
-            for (const partidaNum of selectedPartidas) {
-                const data = finalFormData.get(partidaNum);
+
+            // 1) Persistir operación + gestión + movimientos (transacción SQLite única).
+            for (const op of operaciones) {
+                await db.crearOperacionPendiente(op);
+            }
+
+            // 1.b) Registro local de la gestión (pestaña Gestiones + badge "aplicada").
+            // La gestión real la crea el backend de forma atómica dentro de
+            // /sync-operaciones, por eso se marca SYNCED de inmediato: el sync de
+            // gestiones (/mobile/sync/gestiones) sólo sube las PENDING y así no
+            // duplica la gestión en el backend.
+            for (const op of operaciones) {
+                const gestionOp = op.gestion || {};
                 await db.saveGestion({
                     tipo: 'STOCK',
                     ruta_id: rutaActiva?.id || 0,
-                    cita: cita as string,
-                    ot: ot as string,
-                    partida: partidaNum,
-                    tipo_cierre: data?.tipo_cierre || '',
-                    material_retirado: JSON.stringify(data?.material_retirado || []),
-                    material_entregado: JSON.stringify(data?.material_entregado || []),
-                    cliente_nombre: clienteNombre.trim(),
-                    cliente_dni: clienteDni.trim(),
-                    latitude: location?.coords.latitude ?? null,
-                    longitude: location?.coords.longitude ?? null,
-                    timestamp,
-                });
+                    cita: op.cita,
+                    ot: op.ot,
+                    partida: op.partida,
+                    tipo_cierre: gestionOp.tipo_cierre || '',
+                    material_retirado: JSON.stringify(gestionOp.material_retirado || []),
+                    material_entregado: JSON.stringify(gestionOp.material_entregado || []),
+                    cliente_nombre: gestionOp.cliente_nombre || '',
+                    cliente_dni: gestionOp.cliente_dni || '',
+                    latitude: gestionOp.latitud ?? null,
+                    longitude: gestionOp.longitud ?? null,
+                    timestamp: op.fecha_hora_creacion,
+                }, true);
+            }
 
+            // 2) Recién después: actualizar el stock local optimista.
+            for (const partidaNum of selectedPartidas) {
+                const data = finalFormData.get(partidaNum);
+                if (!data) continue;
+                for (const item of data.material_retirado || []) {
+                    if (item.material && item.serie_o_cantidad) {
+                        const isSerialized = item.unidad_medida === 'SERIALIZADO';
+                        await db.updateStockLocal(
+                            item.material,
+                            isSerialized ? item.serie_o_cantidad : null,
+                            isSerialized ? 1 : parseInt(item.serie_o_cantidad) || 1,
+                            'add',
+                            item.condicion
+                        );
+                    }
+                }
+                for (const item of data.material_entregado || []) {
+                    if (item.material && item.serie_o_cantidad) {
+                        const isSerialized = item.unidad_medida === 'SERIALIZADO';
+                        await db.updateStockLocal(
+                            item.material,
+                            isSerialized ? item.serie_o_cantidad : null,
+                            isSerialized ? 1 : parseInt(item.serie_o_cantidad) || 1,
+                            'remove',
+                            item.condicion
+                        );
+                    }
+                }
+            }
+
+            for (const partidaNum of selectedPartidas) {
                 setAppliedStock(cita as string, ot as string, partidaNum, {
                     appliedAt: new Date(timestamp),
                     latitude: location?.coords.latitude ?? null,
@@ -769,6 +917,7 @@ export default function SoloStockScreen() {
             Alert.alert('Error', 'No se pudieron guardar los movimientos de stock. Intente nuevamente.', [{ text: 'Entendido' }]);
         } finally {
             setIsSaving(false);
+            submittingRef.current = false;
         }
     };
 

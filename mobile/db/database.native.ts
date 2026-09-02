@@ -24,9 +24,10 @@ export interface DatabaseService {
     getClosureTypes(): Promise<any[]>;
     getTemplate(key: string): Promise<string | null>;
     // Gestiones (unified orders + novedades)
-    saveGestion(gestion: GestionData): Promise<number>;
+    saveGestion(gestion: GestionData, origenOutbox?: boolean): Promise<number>;
     getPendingGestiones(): Promise<GestionRecord[]>;
     markGestionSynced(id: number): Promise<void>;
+    markGestionStockSyncByOperacion(cita: string, ot: string, partida: number): Promise<void>;
     getGestionByService(cita: string, ot: string, partida: number): Promise<GestionRecord | null>;
     getGestionesByRuta(rutaId: number): Promise<GestionRecord[]>;
     // Cleanup methods
@@ -52,6 +53,12 @@ export interface DatabaseService {
     getMovimientosPendientes(): Promise<MovimientoPendiente[]>;
     markMovimientosSynced(ids: number[]): Promise<void>;
     clearSyncedMovimientos(): Promise<void>;
+// Outbox transaccional de operaciones (sync idempotente por operación)
+    crearOperacionPendiente(op: NuevaOperacionPendiente): Promise<void>;
+    getOperacionesPendientes(): Promise<OperacionPendiente[]>;
+    getMovimientosPendientesPorOperacion(operacionUuid: string): Promise<MovimientoPendiente[]>;
+    marcarOperacionEstado(operacionUuid: string, estado: 'PENDING' | 'SENDING' | 'CONFIRMED' | 'REJECTED', resultado?: string | null): Promise<void>;
+    confirmarYLimpiarOperacion(operacionUuid: string): Promise<void>;
     // Ruta activa methods
     saveRutaActiva(ruta: any, servicios: any[]): Promise<void>;
     getRutaActiva(): Promise<{ ruta: any; cachedAt: number } | null>;
@@ -83,6 +90,15 @@ export interface DatabaseService {
     saveServiceDraft(key: string, payload: any): Promise<void>;
     getServiceDraft(key: string): Promise<any | null>;
     deleteServiceDraft(key: string): Promise<void>;
+    // Auditoría de Campo (local, offline-first; solo las completadas llegan al servidor)
+    crearAuditoriaCampoLocal(items: any[], fechaInicio: string): Promise<number>;
+    getAuditoriaCampoLocalActiva(): Promise<AuditoriaCampoLocal | null>;
+    guardarItemsAuditoriaCampoLocal(id: number, items: any[]): Promise<void>;
+    completarAuditoriaCampoLocal(id: number, faltantes: number, sobrantes: number, resultado: string, fechaFin: string): Promise<void>;
+    cancelarAuditoriaCampoLocal(id: number): Promise<void>;
+    getAuditoriasCampoFinalizadas(limit?: number): Promise<AuditoriaCampoLocal[]>;
+    getAuditoriasCampoPendientesSync(): Promise<AuditoriaCampoLocal[]>;
+    marcarAuditoriaCampoSincronizada(id: number): Promise<void>;
 }
 
 // Type for saving a new gestion
@@ -148,6 +164,20 @@ export interface StockLocalItem {
     ubicacion_codigo?: string; // Código de ubicación del técnico
 }
 
+// Type for local field audit (auditoría de campo)
+export interface AuditoriaCampoLocal {
+    id: number;
+    fecha_inicio: string;
+    fecha_fin: string | null;
+    resultado: string;         // OK | CON_DIFERENCIAS
+    faltantes: number;
+    sobrantes: number;
+    estado: string;            // EN_CURSO | FINALIZADA
+    pendiente_sync: number;    // 0 | 1
+    sync_uuid: string;
+    items: any[];              // ítems con diferencia (FALTANTE/SOBRANTE)
+}
+
 // Type for pending movement to sync
 export interface MovimientoPendiente {
     id?: number;
@@ -163,6 +193,33 @@ export interface MovimientoPendiente {
     foto_serie: string | null;
     fecha_hora: string;
     synced?: number;
+}
+
+// Type para crear una operación pendiente en el outbox transaccional.
+// La operación agrupa gestión + movimientos con UUIDs estables (idempotencia).
+export interface NuevaOperacionPendiente {
+    operacion_uuid: string;
+    tipo_gestion: 'STOCK' | 'ORDEN' | 'AJUSTE';
+    cita: string;
+    ot: string;
+    partida: number;
+    fecha_hora_creacion: string;
+    gestion: any;             // Campos de la gestión (GestionOperacionSync en backend)
+    movimientos: MovimientoPendiente[];  // Cada uno con su propio uuid
+}
+
+// Type para leer una operación pendiente de la tabla operaciones_pendientes
+export interface OperacionPendiente {
+    operacion_uuid: string;
+    tipo_gestion: 'STOCK' | 'ORDEN' | 'AJUSTE';
+    cita: string;
+    ot: string;
+    partida: number;
+    fecha_hora_creacion: string;
+    gestion_json: string;
+    estado: 'PENDING' | 'SENDING' | 'CONFIRMED' | 'REJECTED';
+    resultado_json?: string | null;
+    created_at: number;
 }
 
 // Type for location tracking
@@ -339,7 +396,8 @@ class DatabaseServiceImpl implements DatabaseService {
                 longitude REAL,
                 timestamp TEXT NOT NULL,
                 status TEXT DEFAULT 'PENDING',
-                created_at INTEGER
+                created_at INTEGER,
+                origen_outbox INTEGER DEFAULT 0
             );
         `);
 
@@ -347,6 +405,16 @@ class DatabaseServiceImpl implements DatabaseService {
         try {
             await db.execAsync(`ALTER TABLE gestiones ADD COLUMN ruta_id INTEGER DEFAULT 0`);
             console.log('Database: Added ruta_id column to gestiones table');
+        } catch (e) {
+            // Column already exists, ignore
+        }
+
+        // Migration: Add origen_outbox column (distingue gestiones creadas por el
+        // outbox transaccional de las del camino histórico). Las del outbox no se
+        // suben por /mobile/sync/gestiones (el backend las crea en /sync-operaciones).
+        try {
+            await db.execAsync(`ALTER TABLE gestiones ADD COLUMN origen_outbox INTEGER DEFAULT 0`);
+            console.log('Database: Added origen_outbox column to gestiones table');
         } catch (e) {
             // Column already exists, ignore
         }
@@ -475,6 +543,30 @@ class DatabaseServiceImpl implements DatabaseService {
             );
         `);
 
+        // Outbox transaccional para el sync nuevo. Las filas asociadas a una
+        // operación no son leídas por el sync histórico.
+        await db.execAsync(`
+            CREATE TABLE IF NOT EXISTS operaciones_pendientes (
+                operacion_uuid TEXT PRIMARY KEY,
+                tipo_gestion TEXT NOT NULL,
+                cita TEXT NOT NULL,
+                ot TEXT NOT NULL,
+                partida INTEGER NOT NULL,
+                fecha_hora_creacion TEXT NOT NULL,
+                gestion_json TEXT NOT NULL,
+                estado TEXT NOT NULL DEFAULT 'PENDING',
+                resultado_json TEXT,
+                created_at INTEGER NOT NULL
+            );
+        `);
+
+        // Migration: Add resultado_json column (guarda motivo de PARTIAL/REJECTED)
+        try {
+            await db.execAsync(`ALTER TABLE operaciones_pendientes ADD COLUMN resultado_json TEXT`);
+        } catch (e) {
+            // Columna ya existe en instalaciones actualizadas.
+        }
+
         // Migration: Add condicion column to existing movimientos_pendientes tables
         try {
             await db.execAsync(`ALTER TABLE movimientos_pendientes ADD COLUMN condicion TEXT`);
@@ -489,10 +581,20 @@ class DatabaseServiceImpl implements DatabaseService {
             // Column already exists - expected on new installs
         }
 
+        try {
+            await db.execAsync(`ALTER TABLE movimientos_pendientes ADD COLUMN operacion_uuid TEXT`);
+        } catch (e) {
+            // La columna ya existe en instalaciones actualizadas.
+        }
+
         // Index para movimientos no sincronizados
         await db.execAsync(`
             CREATE INDEX IF NOT EXISTS idx_movimientos_synced 
             ON movimientos_pendientes(synced);
+        `);
+        await db.execAsync(`
+            CREATE INDEX IF NOT EXISTS idx_movimientos_operacion
+            ON movimientos_pendientes(operacion_uuid, synced);
         `);
 
         // ==================== RUTA ACTIVA TABLES ====================
@@ -662,6 +764,24 @@ class DatabaseServiceImpl implements DatabaseService {
             );
         `);
 
+        // Auditorías de campo: el snapshot completo y sus conteos viven sólo en el
+        // dispositivo hasta que el técnico decide completar.
+        await db.execAsync(`
+            CREATE TABLE IF NOT EXISTS auditorias_campo_local (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fecha_inicio TEXT NOT NULL,
+                fecha_fin TEXT,
+                resultado TEXT,
+                faltantes INTEGER NOT NULL DEFAULT 0,
+                sobrantes INTEGER NOT NULL DEFAULT 0,
+                estado TEXT NOT NULL DEFAULT 'EN_CURSO',
+                pendiente_sync INTEGER NOT NULL DEFAULT 0,
+                sync_uuid TEXT NOT NULL UNIQUE,
+                items_json TEXT NOT NULL DEFAULT '[]'
+            );
+        `);
+        await db.execAsync(`CREATE INDEX IF NOT EXISTS idx_auditoria_campo_sync ON auditorias_campo_local(pendiente_sync, estado);`);
+
         console.log('Database initialized and tables verified.');
     }
 
@@ -741,7 +861,7 @@ class DatabaseServiceImpl implements DatabaseService {
 
     // =============== GESTIONES (Unified Orders + Novedades) ===============
 
-    async saveGestion(gestion: GestionData): Promise<number> {
+    async saveGestion(gestion: GestionData, origenOutbox: boolean = false): Promise<number> {
         const db = await this.getDb();
         const now = Date.now();
 
@@ -753,8 +873,8 @@ class DatabaseServiceImpl implements DatabaseService {
                 tecnico_nombre, tecnico_dni, tecnico_firma,
                 order_image_path, nota_novedad, novedad_image_path,
                 fecha_reagendada, turno_reagendamiento,
-                latitude, longitude, timestamp, status, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)`,
+                latitude, longitude, timestamp, status, created_at, origen_outbox
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)`,
             [
                 gestion.tipo,
                 gestion.ruta_id,
@@ -781,7 +901,8 @@ class DatabaseServiceImpl implements DatabaseService {
                 gestion.latitude || null,
                 gestion.longitude || null,
                 gestion.timestamp,
-                now
+                now,
+                origenOutbox ? 1 : 0
             ]
         );
 
@@ -791,13 +912,26 @@ class DatabaseServiceImpl implements DatabaseService {
 
     async getPendingGestiones(): Promise<GestionRecord[]> {
         const db = await this.getDb();
-        return await db.getAllAsync("SELECT * FROM gestiones WHERE status = 'PENDING' ORDER BY created_at ASC");
+        // Las gestiones STOCK del outbox transaccional NO suben por el camino
+        // histórico (/mobile/sync/gestiones): el backend las crea en /sync-operaciones.
+        return await db.getAllAsync(
+            "SELECT * FROM gestiones WHERE status = 'PENDING' AND (origen_outbox IS NULL OR origen_outbox = 0) ORDER BY created_at ASC"
+        );
     }
 
     async markGestionSynced(id: number): Promise<void> {
         const db = await this.getDb();
         await db.runAsync("UPDATE gestiones SET status = 'SYNCED' WHERE id = ?", [id]);
         console.log(`DatabaseService: Marked gestion ${id} as SYNCED`);
+    }
+
+    async markGestionStockSyncByOperacion(cita: string, ot: string, partida: number): Promise<void> {
+        const db = await this.getDb();
+        await db.runAsync(
+            `UPDATE gestiones SET status = 'SYNCED' WHERE tipo = 'STOCK' AND cita = ? AND ot = ? AND partida = ? AND status = 'PENDING'`,
+            [cita, ot, partida]
+        );
+        console.log(`DatabaseService: Gestión STOCK marcada SYNCED para ${cita}/${ot}/P.${partida}`);
     }
 
     async getGestionByService(cita: string, ot: string, partida: number): Promise<GestionRecord | null> {
@@ -1134,7 +1268,9 @@ class DatabaseServiceImpl implements DatabaseService {
 
     async getMovimientosPendientes(): Promise<MovimientoPendiente[]> {
         const db = await this.getDb();
-        return await db.getAllAsync('SELECT * FROM movimientos_pendientes WHERE synced = 0');
+        // Compatibilidad: el endpoint previo nunca debe enviar movimientos
+        // que ya pertenecen al outbox transaccional.
+        return await db.getAllAsync('SELECT * FROM movimientos_pendientes WHERE synced = 0 AND operacion_uuid IS NULL');
     }
 
     async markMovimientosSynced(ids: number[]): Promise<void> {
@@ -1152,6 +1288,164 @@ class DatabaseServiceImpl implements DatabaseService {
         const db = await this.getDb();
         const result = await db.runAsync('DELETE FROM movimientos_pendientes WHERE synced = 1');
         console.log(`DatabaseService: Cleared ${result.changes} synced movements`);
+    }
+
+// ==================== OUTBOX TRANSACCIONAL DE OPERACIONES ====================
+
+    async crearOperacionPendiente(op: NuevaOperacionPendiente): Promise<void> {
+        const db = await this.getDb();
+        // Transacción única: operación + gestión + movimientos (todo-o-nada).
+        await db.withExclusiveTransactionAsync(async (txn: any) => {
+            await txn.runAsync(
+                `INSERT OR REPLACE INTO operaciones_pendientes
+                    (operacion_uuid, tipo_gestion, cita, ot, partida, fecha_hora_creacion, gestion_json, estado, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)`,
+                [
+                    op.operacion_uuid,
+                    op.tipo_gestion,
+                    op.cita,
+                    op.ot,
+                    op.partida,
+                    op.fecha_hora_creacion,
+                    JSON.stringify(op.gestion),
+                    Date.now()
+                ]
+            );
+            // Eliminar movimientos previos de la operación (si se reintenta localmente
+            // con el mismo UUID) y volver a insertar con sus UUIDs estables.
+            await txn.runAsync(
+                `DELETE FROM movimientos_pendientes WHERE operacion_uuid = ?`,
+                [op.operacion_uuid]
+            );
+            for (const mov of op.movimientos) {
+                const uuid = mov.uuid || generateUUID();
+                await txn.runAsync(
+                    `INSERT INTO movimientos_pendientes
+                        (uuid, operacion_uuid, codigo_material, serie, cantidad, tipo_movimiento, condicion, cita, ot, partida, foto_serie, fecha_hora, synced)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+                    [
+                        uuid,
+                        op.operacion_uuid,
+                        mov.codigo_material,
+                        mov.serie,
+                        mov.cantidad,
+                        mov.tipo_movimiento,
+                        mov.condicion || null,
+                        mov.cita,
+                        mov.ot,
+                        mov.partida,
+                        mov.foto_serie || null,
+                        mov.fecha_hora
+                    ]
+                );
+            }
+        });
+        console.log(`DatabaseService: Operación pendiente creada ${op.operacion_uuid} (${op.movimientos.length} movimientos)`);
+    }
+
+    async getOperacionesPendientes(): Promise<OperacionPendiente[]> {
+        const db = await this.getDb();
+        return await db.getAllAsync(
+            `SELECT * FROM operaciones_pendientes WHERE estado IN ('PENDING', 'SENDING') ORDER BY created_at ASC`
+        );
+    }
+
+    async getMovimientosPendientesPorOperacion(operacionUuid: string): Promise<MovimientoPendiente[]> {
+        const db = await this.getDb();
+        return await db.getAllAsync(
+            `SELECT * FROM movimientos_pendientes WHERE operacion_uuid = ? ORDER BY id ASC`,
+            [operacionUuid]
+        );
+    }
+
+    async marcarOperacionEstado(
+        operacionUuid: string,
+        estado: 'PENDING' | 'SENDING' | 'CONFIRMED' | 'REJECTED',
+        resultado?: string | null
+    ): Promise<void> {
+        const db = await this.getDb();
+        if (resultado !== undefined) {
+            await db.runAsync(
+                `UPDATE operaciones_pendientes SET estado = ?, resultado_json = ? WHERE operacion_uuid = ?`,
+                [estado, resultado, operacionUuid]
+            );
+        } else {
+            await db.runAsync(
+                `UPDATE operaciones_pendientes SET estado = ?, resultado_json = NULL WHERE operacion_uuid = ?`,
+                [estado, operacionUuid]
+            );
+        }
+        console.log(`DatabaseService: Operación ${operacionUuid} → ${estado}`);
+    }
+
+    async confirmarYLimpiarOperacion(operacionUuid: string): Promise<void> {
+        const db = await this.getDb();
+        // Confirmar y limpiar en una sola transacción: la operación y sus movimientos
+        // dejan de existir localmente; el backend ya los tiene como fuente de verdad.
+        await db.withExclusiveTransactionAsync(async (txn: any) => {
+            await txn.runAsync(`DELETE FROM movimientos_pendientes WHERE operacion_uuid = ?`, [operacionUuid]);
+            await txn.runAsync(`DELETE FROM operaciones_pendientes WHERE operacion_uuid = ?`, [operacionUuid]);
+        });
+        console.log(`DatabaseService: Operación ${operacionUuid} confirmada y limpiada`);
+    }
+
+    // ==================== AUDITORÍA DE CAMPO ====================
+    // Local, offline-first; solo las completadas llegan al servidor
+
+    async crearAuditoriaCampoLocal(items: any[], fechaInicio: string): Promise<number> {
+        const db = await this.getDb();
+        const result = await db.runAsync(
+            `INSERT INTO auditorias_campo_local (fecha_inicio, sync_uuid, items_json) VALUES (?, ?, ?)`,
+            [fechaInicio, generateUUID(), JSON.stringify(items)]
+        );
+        return result.lastInsertRowId;
+    }
+
+    async getAuditoriaCampoLocalActiva(): Promise<AuditoriaCampoLocal | null> {
+        const db = await this.getDb();
+        const row: any = await db.getFirstAsync(`SELECT * FROM auditorias_campo_local WHERE estado = 'EN_CURSO' ORDER BY id DESC LIMIT 1`);
+        return row ? this.parseAuditoriaCampo(row) : null;
+    }
+
+    async guardarItemsAuditoriaCampoLocal(id: number, items: any[]): Promise<void> {
+        const db = await this.getDb();
+        await db.runAsync(`UPDATE auditorias_campo_local SET items_json = ? WHERE id = ? AND estado = 'EN_CURSO'`, [JSON.stringify(items), id]);
+    }
+
+    async completarAuditoriaCampoLocal(id: number, faltantes: number, sobrantes: number, resultado: string, fechaFin: string): Promise<void> {
+        const db = await this.getDb();
+        await db.runAsync(
+            `UPDATE auditorias_campo_local SET fecha_fin = ?, faltantes = ?, sobrantes = ?, resultado = ?, estado = 'FINALIZADA', pendiente_sync = 1 WHERE id = ? AND estado = 'EN_CURSO'`,
+            [fechaFin, faltantes, sobrantes, resultado, id]
+        );
+    }
+
+    async cancelarAuditoriaCampoLocal(id: number): Promise<void> {
+        const db = await this.getDb();
+        await db.runAsync(`DELETE FROM auditorias_campo_local WHERE id = ? AND estado = 'EN_CURSO'`, [id]);
+    }
+
+    async getAuditoriasCampoFinalizadas(limit: number = 10): Promise<AuditoriaCampoLocal[]> {
+        const db = await this.getDb();
+        const rows: any[] = await db.getAllAsync(`SELECT * FROM auditorias_campo_local WHERE estado = 'FINALIZADA' ORDER BY fecha_fin DESC LIMIT ?`, [limit]);
+        return rows.map(row => this.parseAuditoriaCampo(row));
+    }
+
+    async getAuditoriasCampoPendientesSync(): Promise<AuditoriaCampoLocal[]> {
+        const db = await this.getDb();
+        const rows: any[] = await db.getAllAsync(`SELECT * FROM auditorias_campo_local WHERE estado = 'FINALIZADA' AND pendiente_sync = 1 ORDER BY fecha_fin ASC`);
+        return rows.map(row => this.parseAuditoriaCampo(row));
+    }
+
+    async marcarAuditoriaCampoSincronizada(id: number): Promise<void> {
+        const db = await this.getDb();
+        await db.runAsync(`UPDATE auditorias_campo_local SET pendiente_sync = 0 WHERE id = ?`, [id]);
+    }
+
+    private parseAuditoriaCampo(row: any): AuditoriaCampoLocal {
+        let items: any[] = [];
+        try { items = JSON.parse(row.items_json || '[]'); } catch { /* corrupt local draft is treated as empty */ }
+        return { ...row, items } as AuditoriaCampoLocal;
     }
 
     // ==================== RUTA ACTIVA METHODS ====================

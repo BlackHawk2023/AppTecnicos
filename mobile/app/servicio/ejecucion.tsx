@@ -771,6 +771,44 @@ export default function EjecucionScreen() {
             return false;
         }
 
+        // Validation 4b: Check for duplicate serialized items in material_retirado
+        // (espejo del check de ENTREGA). El backend ya rechaza el segundo retiro
+        // como PENDIENTE, pero evitamos cargar una gestión que quedaría incompleta.
+        const serializedRetiradosDup = formData.material_retirado.filter(
+            m => m.unidad_medida === 'SERIALIZADO' && m.serie_o_cantidad
+        );
+        const retiroSet = new Set<string>();
+        const retiroDuplicates: string[] = [];
+
+        for (const item of serializedRetiradosDup) {
+            const serial = item.serie_o_cantidad.toLowerCase();
+            if (retiroSet.has(serial)) {
+                retiroDuplicates.push(item.serie_o_cantidad);
+            } else {
+                retiroSet.add(serial);
+            }
+        }
+
+        if (retiroDuplicates.length > 0) {
+            Alert.alert(
+                'Seriales Duplicados',
+                `Los siguientes números de serie están duplicados en Material Retirado: ${retiroDuplicates.join(', ')}. Cada serial solo puede retirarse una vez.`,
+                [{ text: 'Revisar' }]
+            );
+            return false;
+        }
+
+        // Validation 4c: Un mismo serial no puede estar simultáneamente en retirado y entregado
+        const serieEnRetiroYEntrega = [...retiroSet].filter(s => serialSet.has(s));
+        if (serieEnRetiroYEntrega.length > 0) {
+            Alert.alert(
+                'Serial Duplicado',
+                `El serial "${serieEnRetiroYEntrega.join('", "')}" está cargado simultáneamente en Material Retirado y Material Entregado. Retirar y entregar el mismo serial en una misma gestión no es válido.`,
+                [{ text: 'Revisar' }]
+            );
+            return false;
+        }
+
         // Validation 5: Check that all serialized deliveries exist in technician's stock
         try {
             const db = await loadDatabaseService();
@@ -785,8 +823,17 @@ export default function EjecucionScreen() {
                         s.condicion === item.condicion // FIX #2: Check condition match
                     );
                     if (!hasInStock) {
-                        const condText = item.condicion !== 'BUENO' ? ` en condición ${item.condicion}` : '';
-                        notInStock.push(`${item.material} (${item.serie_o_cantidad})${condText}`);
+                        // Hint accionable: si la serie está bajo otro material, se lo decimos.
+                        const enOtro = stockItems.find((s: any) =>
+                            s.serie?.toLowerCase() === item.serie_o_cantidad.toLowerCase() &&
+                            s.codigo_material !== item.material
+                        );
+                        if (enOtro) {
+                            notInStock.push(`${item.material} (${item.serie_o_cantidad}): la serie está en su stock como ${enOtro.codigo_material} - ${enOtro.nombre_material}. Seleccione ese material.`);
+                        } else {
+                            const condText = item.condicion !== 'BUENO' ? ` en condición ${item.condicion}` : '';
+                            notInStock.push(`${item.material} (${item.serie_o_cantidad})${condText}`);
+                        }
                     }
                 }
 
@@ -1085,16 +1132,7 @@ export default function EjecucionScreen() {
 
                 // If material is SERIALIZADO and user entered a serial - validate for entregado
                 if (item.unidad_medida === 'SERIALIZADO' && type === 'entregado') {
-                    const hasInStock = stockItems.some((s: any) =>
-                        s.codigo_material === item.material &&
-                        s.serie?.toLowerCase() === inputValue.toLowerCase()
-                    );
-
-                    if (!hasInStock) {
-                        updateMaterialItem(type, itemId, 'error', `Serie "${inputValue}" no encontrada en su stock`);
-                    } else {
-                        updateMaterialItem(type, itemId, 'error', '');
-                    }
+                    updateMaterialItem(type, itemId, 'error', getSerieEntregaError(stockItems, item.material, inputValue));
                     return;
                 }
 
@@ -1147,6 +1185,30 @@ export default function EjecucionScreen() {
         }
     };
 
+    // Mensaje de error accionable para entregas serializadas: si la serie NO está
+    // bajo el material seleccionado PERO sí está en el stock bajo otro código
+    // (p.ej. una SIM cargada con otro operador), se le indica al técnico cuál es
+    // el material correcto en lugar de un genérico "no encontrada".
+    // Retorna '' cuando la serie está disponible bajo ese material y condición.
+    const getSerieEntregaError = (stockItems: any[], material: string, serie: string, condicion?: string): string => {
+        const serieLower = (serie || '').toLowerCase();
+        if (!serieLower) return '';
+        const enEsteMaterial = stockItems.find((s: any) =>
+            s.codigo_material === material && s.serie?.toLowerCase() === serieLower
+        );
+        if (enEsteMaterial) {
+            if (condicion && enEsteMaterial.condicion !== condicion) {
+                return `La serie "${serie}" está en su stock en condición ${enEsteMaterial.condicion}, no en ${condicion}.`;
+            }
+            return '';
+        }
+        const enOtroMaterial = stockItems.find((s: any) => s.serie?.toLowerCase() === serieLower);
+        if (enOtroMaterial) {
+            return `La serie "${serie}" está en su stock como ${enOtroMaterial.codigo_material} - ${enOtroMaterial.nombre_material || enOtroMaterial.codigo_material}. Seleccione ese material para poder entregarla.`;
+        }
+        return `Serie "${serie}" no encontrada en su stock`;
+    };
+
     // Validate material against stock in real-time (for entregado only)
     const validateMaterialStock = async (
         type: 'retirado' | 'entregado',
@@ -1174,19 +1236,9 @@ export default function EjecucionScreen() {
             const stockItems = await db.getStockLocal();
 
             if (unidadMedida === 'SERIALIZADO') {
-                // Check if this exact serial exists in stock with matching condition
-                const hasInStock = stockItems.some((s: any) =>
-                    s.codigo_material === material &&
-                    s.serie?.toLowerCase() === serieOCantidad.toLowerCase() &&
-                    (!condicion || s.condicion === condicion)
-                );
-
-                if (!hasInStock) {
-                    const condMsg = condicion && condicion !== 'BUENO' ? ` en condición ${condicion}` : '';
-                    updateMaterialItem(type, itemId, 'error', `Serie "${serieOCantidad}"${condMsg} no encontrada en su stock para este material`);
-                } else {
-                    updateMaterialItem(type, itemId, 'error', '');
-                }
+                // Mensaje accionable: si la serie está en el stock bajo OTRO material,
+                // le decimos cuál es en lugar de un genérico "no encontrada".
+                updateMaterialItem(type, itemId, 'error', getSerieEntregaError(stockItems, material, serieOCantidad, condicion));
             } else {
                 // Check if quantity is available with matching condition
                 const cantidad = parseInt(serieOCantidad) || 0;
@@ -1209,14 +1261,25 @@ export default function EjecucionScreen() {
 
     // Register stock movements for all completed partidas
     const registerStockMovements = async () => {
+        let registrados = 0;
         try {
             const db = await loadDatabaseService();
-            if (!db) return;
+            if (!db) {
+                console.warn('RegisterStockMovements: DB no disponible, no se registraron movimientos');
+                return;
+            }
 
             // Iterate through all selected partidas and their materials
             for (const partidaNum of selectedPartidas) {
                 const partidaData = partidaFormData.get(partidaNum);
-                if (!partidaData) continue;
+                if (!partidaData) {
+                    // Diagnóstico: registro silencioso de movimientos = pérdidas silenciosas.
+                    console.warn(
+                        `RegisterStockMovements: partida ${partidaNum} SIN datos en partidaFormData ` +
+                        `(partidas con datos: ${Array.from(partidaFormData.keys()).join(',') || 'ninguna'})`
+                    );
+                    continue;
+                }
 
                 // Register materials retirados (RETIRO = technician picks up)
                 for (const item of partidaData.material_retirado || []) {
@@ -1243,6 +1306,7 @@ export default function EjecucionScreen() {
                             'add',
                             item.condicion
                         );
+                        registrados++;
                     }
                 }
 
@@ -1271,11 +1335,15 @@ export default function EjecucionScreen() {
                             'remove',
                             item.condicion
                         );
+                        registrados++;
                     }
                 }
             }
 
-            console.log('Stock movements registered successfully');
+            console.log(
+                `RegisterStockMovements: ${registrados} movimientos registrados en SQLite ` +
+                `(partidas: ${selectedPartidas.join(',') || 'ninguna'})`
+            );
         } catch (error) {
             console.error('Error registering stock movements:', error);
             throw error;
@@ -1747,40 +1815,46 @@ export default function EjecucionScreen() {
                 // Build list of all generated paths (including current one)
                 const allPaths = [...generatedOrderPaths, jpgPath];
 
-                // Check if email is available
-                const isAvailable = await MailComposer.isAvailableAsync();
-                if (isAvailable) {
-                    // Compose email with all orders attached
-                    const partidasList = selectedPartidas.join(', ');
-                    await MailComposer.composeAsync({
-                        subject: `Órdenes de Servicio - OT ${formData.ot}`,
-                        body: `Adjunto las órdenes de servicio generadas:\n\n` +
-                            `• OT: ${formData.ot}\n` +
-                            `• Cliente: ${formData.cliente}\n` +
-                            `• Partidas: ${partidasList}\n` +
-                            `• Cantidad de órdenes: ${allPaths.length}\n\n` +
-                            `Generado desde la aplicación de técnicos.`,
-                        attachments: allPaths,
-                    });
-                } else {
-                    // Fallback to individual sharing if email not available
-                    Alert.alert(
-                        'Email no disponible',
-                        'No se puede enviar por email. ¿Desea compartir las órdenes individualmente?',
-                        [
-                            { text: 'Cancelar', style: 'cancel' },
-                            {
-                                text: 'Compartir',
-                                onPress: async () => {
-                                    for (const path of allPaths) {
-                                        if (await Sharing.isAvailableAsync()) {
-                                            await Sharing.shareAsync(path);
+                // Email/compartir es "best effort": un fallo acá NO debe abortar
+                // el registro de movimientos de stock (que corre recién después).
+                try {
+                    // Check if email is available
+                    const isAvailable = await MailComposer.isAvailableAsync();
+                    if (isAvailable) {
+                        // Compose email with all orders attached
+                        const partidasList = selectedPartidas.join(', ');
+                        await MailComposer.composeAsync({
+                            subject: `Órdenes de Servicio - OT ${formData.ot}`,
+                            body: `Adjunto las órdenes de servicio generadas:\n\n` +
+                                `• OT: ${formData.ot}\n` +
+                                `• Cliente: ${formData.cliente}\n` +
+                                `• Partidas: ${partidasList}\n` +
+                                `• Cantidad de órdenes: ${allPaths.length}\n\n` +
+                                `Generado desde la aplicación de técnicos.`,
+                            attachments: allPaths,
+                        });
+                    } else {
+                        // Fallback to individual sharing if email not available
+                        Alert.alert(
+                            'Email no disponible',
+                            'No se puede enviar por email. ¿Desea compartir las órdenes individualmente?',
+                            [
+                                { text: 'Cancelar', style: 'cancel' },
+                                {
+                                    text: 'Compartir',
+                                    onPress: async () => {
+                                        for (const path of allPaths) {
+                                            if (await Sharing.isAvailableAsync()) {
+                                                await Sharing.shareAsync(path);
+                                            }
                                         }
                                     }
                                 }
-                            }
-                        ]
-                    );
+                            ]
+                        );
+                    }
+                } catch (shareError) {
+                    console.error('Error compartiendo órdenes (el registro de stock continúa igualmente):', shareError);
                 }
 
                 // Clear accumulated paths for next use

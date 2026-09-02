@@ -254,6 +254,7 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
         let downloadSuccess = true;
         let gestionesSynced = 0;
         let stockMovementsSynced = 0;
+        let operacionesSynced = 0;
         // Hoist db reference so catch block can also write to sync_log
         let db: any = null;
         let syncErrorDetail: string | null = null;
@@ -273,6 +274,26 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
             // ═══════════════════════════════════════════════════════════════
             // FASE 1: UPLOAD — Subir TODO lo pendiente antes de cualquier otra cosa
             // ═══════════════════════════════════════════════════════════════
+
+            // 1.0 Subir operaciones pendientes del outbox transaccional (PRIMERO)
+            // Razón: cada operación agrupa gestión + movimientos con UUIDs estables;
+            // es el camino idempotente por (tecnico, operacion_uuid). Debe correr antes
+            // del sync histórico para no mezclar un mismo movimiento por dos rutas.
+            try {
+                const pendientesOperaciones = await db.getOperacionesPendientes();
+                if (pendientesOperaciones.length > 0) {
+                    console.log(`RouteContext: Uploading ${pendientesOperaciones.length} operaciones...`);
+                    const result = await syncService.syncOperaciones();
+                    if (result.success) {
+                        operacionesSynced = pendientesOperaciones.length;
+                    } else {
+                        uploadSuccess = false;
+                    }
+                }
+            } catch (opErrors) {
+                console.error('RouteContext: Operaciones upload failed:', opErrors);
+                uploadSuccess = false;
+            }
 
             // 1.1 Subir movimientos de stock pendientes (PRIMERO)
             // Razón: el backend necesita actualizar inventario ANTES de recibir
@@ -320,6 +341,18 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
             } catch (locError) {
                 console.log('RouteContext: Location upload failed:', locError);
                 // Non-critical
+            }
+
+            // 1.4 Subir auditorías de campo finalizadas en modo offline.
+            try {
+                const pendientesAuditoria = await db.getAuditoriasCampoPendientesSync();
+                if (pendientesAuditoria.length > 0) {
+                    const result = await syncService.syncAuditoriasCampo();
+                    if (!result.success) uploadSuccess = false;
+                }
+            } catch (auditoriaError) {
+                console.error('RouteContext: Auditorías de campo upload failed:', auditoriaError);
+                uploadSuccess = false;
             }
 
             // ═══════════════════════════════════════════════════════════════
@@ -554,8 +587,11 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
             // Show success feedback to user
             if (!silent && uploadSuccess && downloadSuccess) {
                 let message = '✓ Sincronización completada correctamente.';
-                if (gestionesSynced > 0 || stockMovementsSynced > 0) {
+                if (operacionesSynced > 0 || gestionesSynced > 0 || stockMovementsSynced > 0) {
                     const parts = [];
+                    if (operacionesSynced > 0) {
+                        parts.push(`${operacionesSynced} ${operacionesSynced === 1 ? 'operacion de stock' : 'operaciones de stock'}`);
+                    }
                     if (gestionesSynced > 0) {
                         parts.push(`${gestionesSynced} ${gestionesSynced === 1 ? 'servicio registrado' : 'servicios registrados'}`);
                     }

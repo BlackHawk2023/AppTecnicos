@@ -13,9 +13,10 @@ export interface DatabaseService {
     getClosureTypes(): Promise<any[]>;
     getTemplate(key: string): Promise<string | null>;
     // Gestiones (unified orders + novedades)
-    saveGestion(gestion: GestionData): Promise<number>;
+    saveGestion(gestion: GestionData, origenOutbox?: boolean): Promise<number>;
     getPendingGestiones(): Promise<GestionRecord[]>;
     markGestionSynced(id: number): Promise<void>;
+    markGestionStockSyncByOperacion(cita: string, ot: string, partida: number): Promise<void>;
     getGestionByService(cita: string, ot: string, partida: number): Promise<GestionRecord | null>;
     // Cleanup methods
     hasPendingGestiones(): Promise<boolean>;
@@ -66,6 +67,9 @@ class WebDatabaseStub implements DatabaseService {
     }
     async markGestionSynced(_id: number): Promise<void> {
         console.log('Database: Web - markGestionSynced skipped');
+    }
+    async markGestionStockSyncByOperacion(_cita: string, _ot: string, _partida: number): Promise<void> {
+        console.log('Database: Web - markGestionStockSyncByOperacion skipped');
     }
     async getGestionByService(_cita: string, _ot: string, _partida: number): Promise<GestionRecord | null> {
         return null;

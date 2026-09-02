@@ -86,6 +86,33 @@ export interface SyncResult {
 
 class SyncService {
 
+    /** Sube auditorías ya finalizadas. El UUID local hace seguro reintentar. */
+    async syncAuditoriasCampo(): Promise<SyncResult> {
+        if (Platform.OS === 'web') return { success: true, message: 'Auditorías no disponibles en web' };
+        try {
+            if (!databaseService) {
+                const { createDatabaseService } = await import('../db/database');
+                databaseService = createDatabaseService();
+            }
+            await databaseService.init();
+            const pendientes = await databaseService.getAuditoriasCampoPendientesSync();
+            for (const auditoria of pendientes) {
+                const items = (auditoria.items || []).filter((item: any) => item.tipo === 'FALTANTE' || item.tipo === 'SOBRANTE');
+                await api.post('/mobile/auditoria-campo/completar', {
+                    fecha_inicio: auditoria.fecha_inicio,
+                    fecha_fin: auditoria.fecha_fin,
+                    sync_uuid: auditoria.sync_uuid,
+                    items,
+                });
+                await databaseService.marcarAuditoriaCampoSincronizada(auditoria.id);
+            }
+            return { success: true, message: `${pendientes.length} auditoría(s) sincronizada(s)`, timestamp: new Date().toISOString() };
+        } catch (error: any) {
+            console.warn('SyncService: No se pudieron sincronizar auditorías de campo:', error);
+            return { success: false, message: error.message || 'Error sincronizando auditorías de campo' };
+        }
+    }
+
     /**
      * Download Metadata (Closures, Materials, Templates) from backend
      * and save to local SQLite DB.
@@ -488,6 +515,10 @@ class SyncService {
                 }
 
                 return {
+                    // UUID persistido al crear el movimiento local. No se
+                    // regenera en reintentos: el backend lo usa como clave de
+                    // idempotencia determinística.
+                    movimiento_uuid: m.uuid,
                     codigo_material: m.codigo_material,
                     serie: m.serie,
                     cantidad: m.cantidad,
@@ -508,6 +539,13 @@ class SyncService {
                 movimientos: movimientos,
                 batch_id: batch_id
             });
+
+            // El backend es la fuente de verdad. Incluso ante un resultado
+            // parcial (serie duplicada, stock insuficiente), reconciliar el
+            // cache evita que el update optimista local quede desfasado.
+            if (Array.isArray(response.data?.stock_actualizado)) {
+                await databaseService.saveStockLocal(response.data.stock_actualizado);
+            }
 
             if (response.data?.success) {
                 // Mark as synced
@@ -538,6 +576,187 @@ class SyncService {
         }
     }
 
+// ==================== SYNC DE OPERACIONES (OUTBOX TRANSACCIONAL) ====================
+
+    /**
+     * Sincroniza operaciones pendientes del outbox transaccional.
+     *
+     * Cada operación agrupa una gestión (STOCK) y sus movimientos, con UUIDs
+     * estables. El backend es idempotente por (tecnico, operacion_uuid) y por
+     * (tecnico, movimiento_uuid). Los reintentos reutilizan el mismo UUID, por lo
+     * que una caída de red o respuesta perdida no genera duplicados.
+     *
+     * Estados de respuesta del backend:
+     * - PROCESADA / YA_PROCESADA → confirmar y limpiar la operación local.
+     * - PARTIAL → refrescar stock local desde stock_actualizado y marcar REJECTED.
+     * - ERROR / REJECTED → conservar resultado y marcar REJECTED.
+     * Error técnico (red/5xx) → volver SENDING a PENDING; nunca regenerar UUIDs.
+     */
+    async syncOperaciones(): Promise<SyncResult> {
+        if (Platform.OS === 'web') {
+            return { success: true, message: 'Operaciones no disponibles en web' };
+        }
+
+        try {
+            if (!databaseService) {
+                const { createDatabaseService } = await import('../db/database');
+                databaseService = createDatabaseService();
+                await databaseService.init();
+            }
+
+            const operaciones = await databaseService.getOperacionesPendientes();
+            if (!operaciones || operaciones.length === 0) {
+                return { success: true, message: 'No hay operaciones pendientes' };
+            }
+
+            console.log(`SyncService: Sincronizando ${operaciones.length} operaciones pendientes...`);
+
+            // Marcar SENDING para que un crash a mitad de envío recupere el mismo UUID.
+            for (const op of operaciones) {
+                await databaseService.marcarOperacionEstado(op.operacion_uuid, 'SENDING');
+            }
+
+            // Construir payload por operación con sus movimientos.
+            const operacionesPayload = [];
+            for (const op of operaciones) {
+                const movimientos = await databaseService.getMovimientosPendientesPorOperacion(op.operacion_uuid);
+                let gestion = {};
+                try {
+                    gestion = JSON.parse(op.gestion_json || '{}');
+                } catch (e) {
+                    console.error(`SyncService: gestión inválida en ${op.operacion_uuid}`, e);
+                }
+
+                const movimientosPayload = [];
+                for (const m of movimientos) {
+                    let foto_serie_base64: string | null = null;
+                    if (m.foto_serie) {
+                        foto_serie_base64 = await readImageAsBase64(m.foto_serie);
+                    }
+                    movimientosPayload.push({
+                        movimiento_uuid: m.uuid,
+                        tipo_movimiento: m.tipo_movimiento,
+                        codigo_material: m.codigo_material,
+                        serie: m.serie,
+                        cantidad: m.cantidad,
+                        condicion: m.condicion || 'BUENO',
+                        foto_serie: foto_serie_base64,
+                        fecha_hora: m.fecha_hora,
+                    });
+                }
+
+                operacionesPayload.push({
+                    operacion_uuid: op.operacion_uuid,
+                    tipo_gestion: op.tipo_gestion,
+                    cita: op.cita,
+                    ot: op.ot,
+                    partida: op.partida,
+                    fecha_hora_creacion: op.fecha_hora_creacion,
+                    gestion: gestion,
+                    movimientos: movimientosPayload,
+                });
+            }
+const response = await api.post('/mobile/stock/sync-operaciones', {
+                operaciones: operacionesPayload
+            });
+
+            if (!response.data?.success) {
+                // Error técnico: volver SENDING → PENDING conservando UUIDs y fechas.
+                for (const op of operaciones) {
+                    await databaseService.marcarOperacionEstado(op.operacion_uuid, 'PENDING');
+                }
+                return { success: false, message: response.data?.detail || 'Error en sincronización de operaciones' };
+            }
+
+            const resultados = response.data.resultados || [];
+            let confirmadas = 0;
+            let rechazadas = 0;
+            let parciales = 0;
+
+            // Mapa para resolver la gestión local por operación: se marca SYNCED
+            // recién cuando el backend confirma la operación (PROCESADA/YA_PROCESADA).
+            const operacionesPorUuid = new Map<string, any>();
+            for (const op of operaciones) {
+                operacionesPorUuid.set(op.operacion_uuid, op);
+            }
+
+            // Reconciliar stock local con el del backend (fuente de verdad).
+            if (Array.isArray(response.data?.stock_actualizado)) {
+                await databaseService.saveStockLocal(response.data.stock_actualizado);
+            }
+
+            for (const res of resultados) {
+                try {
+                    switch (res.estado) {
+                        case 'PROCESADA':
+                        case 'YA_PROCESADA':
+                            await databaseService.confirmarYLimpiarOperacion(res.operacion_uuid);
+                            // La gestión local STOCK del outbox pasa a SYNCED: el
+                            // backend ya la creó atómicamente dentro de la operación.
+                            const opConfirmada = operacionesPorUuid.get(res.operacion_uuid);
+                            if (opConfirmada) {
+                                await databaseService.markGestionStockSyncByOperacion(
+                                    opConfirmada.cita,
+                                    opConfirmada.ot,
+                                    opConfirmada.partida
+                                );
+                            }
+                            confirmadas += 1;
+                            break;
+                        case 'PARTIAL':
+                            await databaseService.marcarOperacionEstado(
+                                res.operacion_uuid,
+                                'REJECTED',
+                                JSON.stringify(res)
+                            );
+                            parciales += 1;
+                            break;
+                        case 'REJECTED':
+                        case 'ERROR':
+                            await databaseService.marcarOperacionEstado(
+                                res.operacion_uuid,
+                                'REJECTED',
+                                JSON.stringify(res)
+                            );
+                            rechazadas += 1;
+                            break;
+                        default:
+                            // Estado desconocido: volver a PENDING (sin regenerar UUID).
+                            await databaseService.marcarOperacionEstado(res.operacion_uuid, 'PENDING');
+                    }
+                } catch (estadoError) {
+                    console.error(`SyncService: Error procesando resultado de ${res.operacion_uuid}:`, estadoError);
+                }
+            }
+
+            console.log(`SyncService: ${confirmadas} confirmadas, ${parciales} parciales, ${rechazadas} rechazadas`);
+
+            return {
+                success: true,
+                message: `${confirmadas} operaciones sincronizadas`,
+                timestamp: new Date().toISOString()
+            };
+        } catch (error: any) {
+            console.error('SyncService: Error syncing operaciones:', error);
+            // Vuelvo SENDING → PENDING para reintento futuro con los mismos UUIDs.
+            try {
+                if (databaseService) {
+                    const pendientes = await databaseService.getOperacionesPendientes();
+                    for (const op of pendientes) {
+                        if (op.estado === 'SENDING') {
+                            await databaseService.marcarOperacionEstado(op.operacion_uuid, 'PENDING');
+                        }
+                    }
+                }
+            } catch (revertError) {
+                console.error('SyncService: Error revirtiendo SENDING → PENDING:', revertError);
+            }
+            return {
+                success: false,
+                message: error.message || 'Error sincronizando operaciones'
+            };
+        }
+    }
     // ==================== TRANSFERENCIAS (NUEVO SISTEMA) ====================
 
     /**

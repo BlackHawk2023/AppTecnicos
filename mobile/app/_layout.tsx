@@ -99,6 +99,7 @@ export default function RootLayout() {
                   <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
                   <Stack.Screen name="detalle" options={{ title: 'Detalle de Servicio' }} />
                   <Stack.Screen name="servicio" options={{ headerShown: false }} />
+                  <Stack.Screen name="auditoria-campo" options={{ headerShown: true }} />
                 </Stack>
               </ThemeProvider>
             </RouteProvider>

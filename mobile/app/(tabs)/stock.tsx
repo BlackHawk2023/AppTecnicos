@@ -15,7 +15,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useFocusEffect } from 'expo-router';
+import { Href, useFocusEffect, useRouter } from 'expo-router';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import type { StockLocalItem } from '../../db/database';
 import { syncService } from '../../services/sync.service';
@@ -92,6 +92,7 @@ const getConditionColor = (condicion: string) => {
 };
 
 export default function StockScreen() {
+    const router = useRouter();
     const { textScale } = useTextSize();
     const [stockItems, setStockItems] = useState<StockLocalItem[]>([]);
     const [transferencias, setTransferencias] = useState<Transferencia[]>([]);
@@ -920,6 +921,13 @@ export default function StockScreen() {
                             >
                                 <Ionicons name="search" size={18} color="#fff" />
                                 <Text style={styles.verifyButtonText}>Verificar</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                                style={styles.verifyButton}
+                                onPress={() => router.push('/auditoria-campo' as Href)}
+                            >
+                                <Ionicons name="clipboard-outline" size={18} color="#fff" />
+                                <Text style={styles.verifyButtonText}>Auditar</Text>
                             </TouchableOpacity>
                         </View>
                     )}
