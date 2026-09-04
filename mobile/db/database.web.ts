@@ -32,6 +32,7 @@ export interface DatabaseService {
         deleteServiceDraft(key: string): Promise<void>;
     // Movimientos + gestión del outbox (stub para web)
     registerStockMovementsOutbox(params: any): Promise<void>;
+    crearGestionOutboxPendiente(gestion: GestionData & { tipo: 'NOVEDAD' | 'REAGENDAMIENTO' }): Promise<void>;
     getOperacionesPendientes(): Promise<any[]>;
 }
 
@@ -120,6 +121,9 @@ class WebDatabaseStub implements DatabaseService {
     }
     async registerStockMovementsOutbox(_params: any): Promise<void> {
         console.log('Database: Web - registerStockMovementsOutbox skipped');
+    }
+    async crearGestionOutboxPendiente(_gestion: GestionData & { tipo: 'NOVEDAD' | 'REAGENDAMIENTO' }): Promise<void> {
+        console.log('Database: Web - crearGestionOutboxPendiente skipped');
     }
     async getOperacionesPendientes(): Promise<any[]> {
         // RouteContext consulta el outbox en cada sync; en web no hay SQLite.

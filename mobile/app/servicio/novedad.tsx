@@ -201,7 +201,7 @@ export default function NovedadScreen() {
                 // Save novedad for EACH selected partida using unified gestiones table
                 for (const partidaNum of selectedPartidas) {
                     const partidaInfo = partidas.find(p => p.partida === partidaNum);
-                    await db.saveGestion({
+                    await db.crearGestionOutboxPendiente({
                         tipo: 'NOVEDAD',
                         ruta_id: rutaActiva?.id || 0,
                         cita: cita as string,

@@ -678,11 +678,27 @@ class SyncService {
             const operacionesPayload: any[] = [];
             for (const op of operaciones) {
                 const movimientos = await databaseService.getMovimientosPendientesPorOperacion(op.operacion_uuid);
-                let gestion = {};
+                let gestion: any = {};
                 try {
                     gestion = JSON.parse(op.gestion_json || '{}');
                 } catch (e) {
                     console.error(`SyncService: gestión inválida en ${op.operacion_uuid}`, e);
+                }
+                if (Array.isArray(gestion.imagenes)) {
+                    const imagenes: any[] = [];
+                    for (const imagen of gestion.imagenes) {
+                        if (!imagen.path) {
+                            imagenes.push(imagen);
+                            continue;
+                        }
+                        const contenido = await readImageAsBase64(imagen.path);
+                        if (contenido) imagenes.push({
+                            contenido,
+                            nombre: getFilenameFromPath(imagen.path),
+                            tipo: imagen.tipo || 'NOVEDAD_FOTO',
+                        });
+                    }
+                    gestion.imagenes = imagenes;
                 }
 
                 const movimientosPayload: any[] = [];

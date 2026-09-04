@@ -48,6 +48,7 @@ export interface DatabaseService {
     clearSyncedMovimientos(): Promise<void>;
 // Outbox transaccional de operaciones (sync idempotente por operación)
     crearOperacionPendiente(op: NuevaOperacionPendiente): Promise<void>;
+    crearGestionOutboxPendiente(gestion: GestionData & { tipo: 'NOVEDAD' | 'REAGENDAMIENTO' }): Promise<void>;
     getOperacionesPendientes(): Promise<OperacionPendiente[]>;
     getMovimientosPendientesPorOperacion(operacionUuid: string): Promise<MovimientoPendiente[]>;
     marcarOperacionEstado(operacionUuid: string, estado: 'PENDING' | 'SENDING' | 'CONFIRMED' | 'REJECTED', resultado?: string | null): Promise<void>;
@@ -193,7 +194,7 @@ export interface MovimientoPendiente {
 // La operación agrupa gestión + movimientos con UUIDs estables (idempotencia).
 export interface NuevaOperacionPendiente {
     operacion_uuid: string;
-    tipo_gestion: 'STOCK' | 'ORDEN' | 'AJUSTE';
+    tipo_gestion: 'STOCK' | 'ORDEN' | 'AJUSTE' | 'NOVEDAD' | 'REAGENDAMIENTO';
     cita: string;
     ot: string;
     partida: number;
@@ -884,8 +885,13 @@ class DatabaseServiceImpl implements DatabaseService {
 
     async saveGestion(gestion: GestionData, origenOutbox: boolean = false): Promise<number> {
         const db = await this.getDb();
-        const now = Date.now();
+        const id = await this.insertGestion(db, gestion, origenOutbox);
+        console.log(`DatabaseService: Saved gestion type=${gestion.tipo} ruta=${gestion.ruta_id} for OT=${gestion.ot} partida=${gestion.partida}`);
+        return id;
+    }
 
+    private async insertGestion(db: any, gestion: GestionData, origenOutbox: boolean): Promise<number> {
+        const now = Date.now();
         const result = await db.runAsync(
             `INSERT INTO gestiones (
                 tipo, ruta_id, cita, ot, partida, terminal, tipo_cierre, detalle_trabajo, 
@@ -926,8 +932,6 @@ class DatabaseServiceImpl implements DatabaseService {
                 origenOutbox ? 1 : 0
             ]
         );
-
-        console.log(`DatabaseService: Saved gestion type=${gestion.tipo} ruta=${gestion.ruta_id} for OT=${gestion.ot} partida=${gestion.partida}`);
         return result.lastInsertRowId;
     }
 
@@ -953,7 +957,7 @@ class DatabaseServiceImpl implements DatabaseService {
         // la operación (PROCESADA / YA_PROCESADA). Las legacy las sincroniza
         // /mobile/sync/gestiones con markGestionSynced(id).
         await db.runAsync(
-            `UPDATE gestiones SET status = 'SYNCED' WHERE tipo IN ('STOCK', 'ORDEN', 'AJUSTE') AND cita = ? AND ot = ? AND partida = ? AND status = 'PENDING' AND origen_outbox = 1`,
+            `UPDATE gestiones SET status = 'SYNCED' WHERE tipo IN ('STOCK', 'ORDEN', 'AJUSTE', 'NOVEDAD', 'REAGENDAMIENTO') AND cita = ? AND ot = ? AND partida = ? AND status = 'PENDING' AND origen_outbox = 1`,
             [cita, ot, partida]
         );
         console.log(`DatabaseService: Gestión outbox marcada SYNCED para ${cita}/${ot}/P.${partida}`);
@@ -968,7 +972,7 @@ class DatabaseServiceImpl implements DatabaseService {
             `UPDATE gestiones SET status = 'ERROR',
                 observaciones = COALESCE(observaciones, '') || ?,
                 nota_novedad = COALESCE(nota_novedad, '') || ?
-             WHERE tipo IN ('STOCK', 'ORDEN', 'AJUSTE') AND cita = ? AND ot = ? AND partida = ? AND status = 'PENDING' AND origen_outbox = 1`,
+             WHERE tipo IN ('STOCK', 'ORDEN', 'AJUSTE', 'NOVEDAD', 'REAGENDAMIENTO') AND cita = ? AND ot = ? AND partida = ? AND status = 'PENDING' AND origen_outbox = 1`,
             [`\n[ERROR SYNC] ${motivo}`, `\n[ERROR SYNC] ${motivo}`, cita, ot, partida]
         );
         console.log(`DatabaseService: Gestión outbox marcada ERROR para ${cita}/${ot}/P.${partida}: ${motivo}`);
@@ -1468,7 +1472,40 @@ class DatabaseServiceImpl implements DatabaseService {
     async crearOperacionPendiente(op: NuevaOperacionPendiente): Promise<void> {
         const db = await this.getDb();
         await this.withExclusiveTransactionRetry(db, async (txn: any) => {
-            await txn.runAsync(
+            await this.insertOperacion(txn, op);
+        });
+        console.log(`DatabaseService: Operación pendiente creada ${op.operacion_uuid} (${op.movimientos.length} movimientos)`);
+    }
+
+    async crearGestionOutboxPendiente(gestion: GestionData & { tipo: 'NOVEDAD' | 'REAGENDAMIENTO' }): Promise<void> {
+        const op: NuevaOperacionPendiente = {
+            operacion_uuid: generateUUID(),
+            tipo_gestion: gestion.tipo,
+            cita: gestion.cita,
+            ot: gestion.ot,
+            partida: gestion.partida,
+            fecha_hora_creacion: gestion.timestamp,
+            gestion: {
+                terminal: gestion.terminal || null,
+                nota_novedad: gestion.nota_novedad || null,
+                fecha_reagendada: gestion.fecha_reagendada || null,
+                turno_reagendamiento: gestion.turno_reagendamiento || null,
+                latitud: gestion.latitude || null,
+                longitud: gestion.longitude || null,
+                imagenes: gestion.novedad_image_path ? [{ path: gestion.novedad_image_path, tipo: 'NOVEDAD_FOTO' }] : [],
+            },
+            movimientos: [],
+        };
+        const db = await this.getDb();
+        await this.withExclusiveTransactionRetry(db, async (txn: any) => {
+            await this.insertOperacion(txn, op);
+            await this.insertGestion(txn, gestion, true);
+        });
+        console.log(`DatabaseService: Operación y gestión pendientes creadas ${op.operacion_uuid}`);
+    }
+
+    private async insertOperacion(txn: any, op: NuevaOperacionPendiente): Promise<void> {
+        await txn.runAsync(
                 `INSERT OR REPLACE INTO operaciones_pendientes
                     (operacion_uuid, tipo_gestion, cita, ot, partida, fecha_hora_creacion, gestion_json, estado, created_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)`,
@@ -1482,14 +1519,14 @@ class DatabaseServiceImpl implements DatabaseService {
                     JSON.stringify(op.gestion),
                     Date.now()
                 ]
-            );
-            await txn.runAsync(
+        );
+        await txn.runAsync(
                 `DELETE FROM movimientos_pendientes WHERE operacion_uuid = ?`,
                 [op.operacion_uuid]
-            );
-            for (const mov of op.movimientos) {
-                const uuid = mov.uuid || generateUUID();
-                await txn.runAsync(
+        );
+        for (const mov of op.movimientos) {
+            const uuid = mov.uuid || generateUUID();
+            await txn.runAsync(
                     `INSERT INTO movimientos_pendientes
                         (uuid, operacion_uuid, codigo_material, serie, cantidad, tipo_movimiento, condicion, condicion_origen, cita, ot, partida, foto_serie, fecha_hora, synced)
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
@@ -1508,10 +1545,8 @@ class DatabaseServiceImpl implements DatabaseService {
                         mov.foto_serie || null,
                         mov.fecha_hora
                     ]
-                );
-            }
-        });
-        console.log(`DatabaseService: Operación pendiente creada ${op.operacion_uuid} (${op.movimientos.length} movimientos)`);
+            );
+        }
     }
 
     async getOperacionesPendientes(): Promise<OperacionPendiente[]> {

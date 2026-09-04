@@ -44,6 +44,7 @@ interface RouteContextType {
     servicios: any[];
     loading: boolean;
     refreshing: boolean;
+    syncRevision: number;
     hasRoute: boolean;
     generatedOrders: Map<string, GeneratedOrder>;
     reportedNovedades: Map<string, ReportedNovedad>;
@@ -72,6 +73,7 @@ const RouteContext = createContext<RouteContextType>({
     servicios: [],
     loading: false,
     refreshing: false,
+    syncRevision: 0,
     hasRoute: false,
     generatedOrders: new Map(),
     reportedNovedades: new Map(),
@@ -107,6 +109,7 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
     const [servicios, setServicios] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
+    const [syncRevision, setSyncRevision] = useState(0);
     const [hasRoute, setHasRoute] = useState(false);
     const isSyncingRef = useRef(false);
     const [generatedOrders, setGeneratedOrders] = useState<Map<string, GeneratedOrder>>(new Map());
@@ -585,7 +588,7 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
             console.log('RouteContext: Phase 4 Cleanup complete (gestiones preserved for active route).');
 
             // Show success feedback to user
-            if (!silent && uploadSuccess && downloadSuccess) {
+            if (uploadSuccess && downloadSuccess && (!silent || operacionesSynced > 0 || gestionesSynced > 0 || stockMovementsSynced > 0)) {
                 let message = '✓ Sincronización completada correctamente.';
                 if (operacionesSynced > 0 || gestionesSynced > 0 || stockMovementsSynced > 0) {
                     const parts = [];
@@ -643,6 +646,7 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
         } finally {
             isSyncingRef.current = false;
             setRefreshing(false);
+            setSyncRevision(revision => revision + 1);
         }
     }, [user]);
 
@@ -854,6 +858,7 @@ export const RouteProvider = ({ children }: { children: React.ReactNode }) => {
             servicios,
             loading,
             refreshing,
+            syncRevision,
             hasRoute,
             generatedOrders,
             reportedNovedades,

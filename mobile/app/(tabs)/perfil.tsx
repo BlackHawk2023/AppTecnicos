@@ -27,7 +27,7 @@ const loadDatabaseService = async () => {
 export default function PerfilScreen() {
     const { user, signOut } = useAuth();
     const { textSize, setTextSize } = useTextSize();
-    const { syncWithBackend } = useRoute();
+    const { syncWithBackend, syncRevision } = useRoute();
     const insets = useSafeAreaInsets();
     const [signature, setSignature] = useState<string | null>(null);
     const [isSignatureModalVisible, setSignatureModalVisible] = useState(false);
@@ -298,7 +298,7 @@ export default function PerfilScreen() {
             <ServerConfigSection />
 
             {/* Sync Diagnostics Section */}
-            <SyncDiagnosticsSection username={user?.usuario || ''} onSync={syncWithBackend} />
+            <SyncDiagnosticsSection username={user?.usuario || ''} onSync={syncWithBackend} syncRevision={syncRevision} />
 
             {/* Text Size Configuration */}
             <View style={styles.editableSection}>
@@ -624,7 +624,7 @@ const clearStyles = StyleSheet.create({
 });
 
 // Sync Diagnostics Sub-Component
-function SyncDiagnosticsSection({ username, onSync }: { username: string; onSync: () => Promise<void> }) {
+function SyncDiagnosticsSection({ username, onSync, syncRevision }: { username: string; onSync: () => Promise<void>; syncRevision: number }) {
     const [loading, setLoading] = useState(true);
     const [retrying, setRetrying] = useState(false);
     const [lastLog, setLastLog] = useState<{
@@ -641,7 +641,7 @@ function SyncDiagnosticsSection({ username, onSync }: { username: string; onSync
 
     useEffect(() => {
         loadDiagnostics();
-    }, []);
+    }, [syncRevision]);
 
     // Recarga el diagnóstico cada vez que la pestaña vuelve a ganar el foco,
     // no solo al primer montaje. Refresca "Estado de Sincronización" tras un

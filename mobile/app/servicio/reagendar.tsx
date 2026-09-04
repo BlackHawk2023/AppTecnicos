@@ -175,7 +175,7 @@ export default function ReagendarScreen() {
             if (db) {
                 for (const partidaNum of selectedPartidas) {
                     const partidaInfo = partidas.find(p => p.partida === partidaNum);
-                    await db.saveGestion({
+                    await db.crearGestionOutboxPendiente({
                         tipo: 'REAGENDAMIENTO',
                         ruta_id: rutaActiva?.id || 0,
                         cita: cita as string,
