@@ -1,6 +1,7 @@
 import axios, { AxiosInstance } from 'axios';
 import { Storage } from '../utils/storage';
 import { Platform } from 'react-native';
+import Constants from 'expo-constants';
 import { ServerConfigService } from './serverConfig.service';
 
 // Create axios instance without base URL (will be set dynamically)
@@ -91,6 +92,17 @@ api.interceptors.request.use(
         } catch (error) {
             console.error('Error reading token', error);
         }
+
+        // Telemetría backend (fase 3): versión de la app en cada request para
+        // medir el rollout del outbox vs. endpoints legacy.
+        try {
+            const appVersion = (Constants as any)?.expoConfig?.version
+                ?? (Constants as any)?.manifest?.version;
+            if (appVersion) {
+                config.headers['X-App-Version'] = String(appVersion);
+            }
+        } catch (e) { /* sin versión: la request no se bloquea */ }
+
         return config;
     },
     (error) => Promise.reject(error)

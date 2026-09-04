@@ -17,6 +17,7 @@ export interface DatabaseService {
     getPendingGestiones(): Promise<GestionRecord[]>;
     markGestionSynced(id: number): Promise<void>;
     markGestionStockSyncByOperacion(cita: string, ot: string, partida: number): Promise<void>;
+    markGestionStockErrorByOperacion(cita: string, ot: string, partida: number, motivo: string): Promise<void>;
     getGestionByService(cita: string, ot: string, partida: number): Promise<GestionRecord | null>;
     // Cleanup methods
     hasPendingGestiones(): Promise<boolean>;
@@ -28,7 +29,10 @@ export interface DatabaseService {
     getPlantillasMaterial(tipo_incidente?: string, tipo_cierre?: string): Promise<any[]>;
     saveServiceDraft(key: string, payload: any): Promise<void>;
     getServiceDraft(key: string): Promise<any | null>;
-    deleteServiceDraft(key: string): Promise<void>;
+        deleteServiceDraft(key: string): Promise<void>;
+    // Movimientos + gestión del outbox (stub para web)
+    registerStockMovementsOutbox(params: any): Promise<void>;
+    getOperacionesPendientes(): Promise<any[]>;
 }
 
 // Web stub implementation - all methods are no-ops
@@ -71,6 +75,9 @@ class WebDatabaseStub implements DatabaseService {
     async markGestionStockSyncByOperacion(_cita: string, _ot: string, _partida: number): Promise<void> {
         console.log('Database: Web - markGestionStockSyncByOperacion skipped');
     }
+    async markGestionStockErrorByOperacion(_cita: string, _ot: string, _partida: number, _motivo: string): Promise<void> {
+        console.log('Database: Web - markGestionStockErrorByOperacion skipped');
+    }
     async getGestionByService(_cita: string, _ot: string, _partida: number): Promise<GestionRecord | null> {
         return null;
     }
@@ -110,6 +117,13 @@ class WebDatabaseStub implements DatabaseService {
     }
     async deleteServiceDraft(_key: string): Promise<void> {
         console.log('Database: Web - deleteServiceDraft skipped');
+    }
+    async registerStockMovementsOutbox(_params: any): Promise<void> {
+        console.log('Database: Web - registerStockMovementsOutbox skipped');
+    }
+    async getOperacionesPendientes(): Promise<any[]> {
+        // RouteContext consulta el outbox en cada sync; en web no hay SQLite.
+        return [];
     }
 }
 

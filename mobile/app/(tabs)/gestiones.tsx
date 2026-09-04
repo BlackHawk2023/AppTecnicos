@@ -25,6 +25,7 @@ interface GestionGroup {
     ordenes: number;
     novedades: number;
     stocks: number;
+    ajustes: number;
     conFoto: number;
     pendientes: number;
     sincronizadas: number;
@@ -71,6 +72,7 @@ const GestionesScreen = () => {
             ordenes: 0,
             novedades: 0,
             stocks: 0,
+            ajustes: 0,
             conFoto: 0,
             pendientes: 0,
             sincronizadas: 0,
@@ -85,6 +87,8 @@ const GestionesScreen = () => {
         group.resumen.ordenes += 1;
       } else if (gestion.tipo === 'STOCK') {
         group.resumen.stocks += 1;
+      } else if (gestion.tipo === 'AJUSTE') {
+        group.resumen.ajustes += 1;
       } else {
         group.resumen.novedades += 1;
       }
@@ -204,6 +208,11 @@ const GestionesScreen = () => {
                     <Text style={styles.badgeLabel}>{group.resumen.stocks} stocks</Text>
                   </View>
                 )}
+                {group.resumen.ajustes > 0 && (
+                  <View style={[styles.badge, styles.badgeStock, styles.badgeMargin]}>
+                    <Text style={styles.badgeLabel}>{group.resumen.ajustes} ajustes</Text>
+                  </View>
+                )}
               </View>
             </View>
           );
@@ -211,14 +220,15 @@ const GestionesScreen = () => {
         renderItem={({ item }) => {
           const hasPhoto = !!item.order_image_path || !!item.novedad_image_path;
           const isPending = item.status === 'PENDING';
+          const isError = item.status === 'ERROR';
           return (
             <TouchableOpacity style={styles.itemCard} onPress={() => openGestionDetail(item)}>
               <View style={styles.itemLeft}>
                 <View style={styles.iconContainer}>
                   <Ionicons
-                    name={item.tipo === 'STOCK' ? 'layers' : item.tipo === 'ORDEN' ? 'document-text' : 'alert-circle'}
+                    name={item.tipo === 'STOCK' ? 'layers' : item.tipo === 'ORDEN' ? 'document-text' : item.tipo === 'AJUSTE' ? 'swap-vertical' : 'alert-circle'}
                     size={20}
-                    color={item.tipo === 'STOCK' ? '#2980b9' : item.tipo === 'ORDEN' ? '#2ecc71' : '#f39c12'}
+                    color={item.tipo === 'STOCK' ? '#2980b9' : item.tipo === 'ORDEN' ? '#2ecc71' : item.tipo === 'AJUSTE' ? '#8e44ad' : '#f39c12'}
                   />
                 </View>
               </View>
@@ -227,7 +237,7 @@ const GestionesScreen = () => {
                   <Text style={styles.itemTitle}>OT {item.ot} · P.{item.partida}</Text>
                   <Text style={styles.itemTime}>{formatTime(item.timestamp)}</Text>
                 </View>
-                <Text style={styles.itemSubtitle}>{item.tipo === 'STOCK' ? 'Stock aplicado' : item.tipo === 'ORDEN' ? 'Orden cargada' : 'Novedad reportada'}</Text>
+                <Text style={styles.itemSubtitle}>{item.tipo === 'STOCK' ? 'Stock aplicado' : item.tipo === 'ORDEN' ? 'Orden cargada' : item.tipo === 'AJUSTE' ? 'Condición ajustada' : 'Novedad reportada'}</Text>
                 <View style={styles.statusRow}>
                   {hasPhoto ? (
                     <View style={[styles.photoBadge, styles.badgeMargin]}>
@@ -235,8 +245,8 @@ const GestionesScreen = () => {
                       <Text style={styles.photoText}>Foto</Text>
                     </View>
                   ) : null}
-                  <View style={[styles.statusBadge, isPending ? styles.statusPending : styles.statusSynced]}>
-                    <Text style={styles.statusText}>{isPending ? 'PENDIENTE' : 'SINCRONIZADO'}</Text>
+                  <View style={[styles.statusBadge, isError ? styles.statusError : isPending ? styles.statusPending : styles.statusSynced]}>
+                    <Text style={styles.statusText}>{isError ? 'ERROR' : isPending ? 'PENDIENTE' : 'SINCRONIZADO'}</Text>
                   </View>
                 </View>
               </View>
@@ -472,6 +482,9 @@ const styles = StyleSheet.create({
   },
   statusPending: {
     backgroundColor: '#e67e22',
+  },
+  statusError: {
+    backgroundColor: '#e74c3c',
   },
   statusSynced: {
     backgroundColor: '#2ecc71',

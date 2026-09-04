@@ -21,6 +21,7 @@ import type { StockLocalItem } from '../../db/database';
 import { syncService } from '../../services/sync.service';
 import { useRoute } from '../../contexts/RouteContext';
 import { useTextSize } from '../../contexts/TextSizeContext';
+import { generateUUIDv4 } from '../../utils/uuid';
 
 // Types for transfers
 interface TransferenciaItem {
@@ -261,7 +262,7 @@ export default function StockScreen() {
     }, []);
 
     // ACTUALIZAR: Sincroniza TODO desde el backend (usa el mismo proceso que Ruta/Home)
-    const { syncWithBackend, refreshing: contextRefreshing } = useRoute();
+    const { syncWithBackend, refreshing: contextRefreshing, rutaActiva } = useRoute();
 
     const onRefresh = async () => {
         setRefreshing(true);
@@ -588,35 +589,61 @@ export default function StockScreen() {
         try {
             const db = await loadDatabaseService();
             if (db) {
+                // Fase 3: persistir la operación AJUSTE del outbox con UUID estable
+                // ANTES de tocar el stock local. Un sync automático (p. ej. al volver
+                // al primer plano) debe encontrar el outbox completo e idempotente.
+                const timestampCond = new Date().toISOString();
+                const otAjusteCond = `C:${conditionTarget.condicionActual}->${newCondition}`;
+                const detalleAjusteCond = `Ajuste de condición ${conditionTarget.nombre}${conditionTarget.serie ? ` (serie ${conditionTarget.serie})` : ''}: ${conditionTarget.condicionActual} → ${newCondition}`;
+                await db.crearOperacionPendiente({
+                    operacion_uuid: generateUUIDv4(),
+                    tipo_gestion: 'AJUSTE',
+                    cita: 'SISTEMA',
+                    ot: otAjusteCond,
+                    partida: 0,
+                    fecha_hora_creacion: timestampCond,
+                    gestion: {
+                        terminal: '',
+                        tipo_cierre: 'AJUSTE_CONDICION',
+                        observaciones: detalleAjusteCond,
+                        material_retirado: [],
+                        material_entregado: [],
+                    },
+                    movimientos: [{
+                        uuid: generateUUIDv4(),
+                        codigo_material: conditionTarget.codigo,
+                        serie: conditionTarget.serie,
+                        cantidad: amount,
+                        tipo_movimiento: 'AJUSTE',
+                        condicion: newCondition,
+                        cita: 'SISTEMA',
+                        ot: otAjusteCond,
+                        partida: 0,
+                        foto_serie: null,
+                        fecha_hora: timestampCond,
+                    }],
+                });
+                // Gestión local del outbox: queda PENDING hasta que el backend
+                // confirme la operación (SYNCED) o la rechace (ERROR visible).
+                await db.saveGestion({
+                    tipo: 'AJUSTE',
+                    ruta_id: rutaActiva?.id || 0,
+                    cita: 'SISTEMA',
+                    ot: otAjusteCond,
+                    partida: 0,
+                    tipo_cierre: 'AJUSTE_CONDICION',
+                    observaciones: detalleAjusteCond,
+                    nota_novedad: detalleAjusteCond,
+                    timestamp: timestampCond,
+                }, true);
+
+                // Stock local optimista (el backend reconcilia al confirmar).
                 await db.changeCondicionLocal(
                     conditionTarget.codigo,
                     conditionTarget.serie,
                     amount,
                     newCondition
                 );
-
-                // Add sync pending movement logic? 
-                // Currently changeCondicionLocal manages local stock, but we need to tell backend?
-                // The implementation plan implies local change first, then sync?
-                // Actually, backend needs this change.
-                // We should add a pending movement or similar.
-                // For now, let's assume we sync stock changes next sync.
-                // Wait, implementation plan said "Los cambios se guardan localmente y se sincronizan al backend".
-                // We need a mechanism to sync this. 
-                // Maybe `MovimientoPendiente` with type 'AJUSTE'/'CAMBIO_CONDICION'?
-                // Let's add an adjustment movement.
-
-                await db.addMovimientoPendiente({
-                    codigo_material: conditionTarget.codigo,
-                    serie: conditionTarget.serie,
-                    cantidad: amount,
-                    tipo_movimiento: 'AJUSTE', // Or specific type if backend supports
-                    condicion: newCondition, // We added this field!
-                    cita: 'SISTEMA',
-                    ot: `C:${conditionTarget.condicionActual}->${newCondition}`, // Use short format to fit in 20 chars
-                    partida: 0,
-                    fecha_hora: new Date().toISOString()
-                });
 
                 Alert.alert('Éxito', 'Condición actualizada');
                 setShowConditionModal(false);
@@ -658,7 +685,53 @@ export default function StockScreen() {
         try {
             const db = await loadDatabaseService();
             if (db) {
-                // Use changeCondicionLocal with source condition
+                // Fase 3: operación AJUSTE del outbox (antes del stock local).
+                const timestampMove = new Date().toISOString();
+                const otAjusteMove = `C:${moveSource}->${moveTarget}`;
+                const detalleAjusteMove = `Ajuste de stock ${selectedNonSerializedGroup.nombre_material} (${amount} u.): ${moveSource} → ${moveTarget}`;
+                await db.crearOperacionPendiente({
+                    operacion_uuid: generateUUIDv4(),
+                    tipo_gestion: 'AJUSTE',
+                    cita: 'SISTEMA',
+                    ot: otAjusteMove,
+                    partida: 0,
+                    fecha_hora_creacion: timestampMove,
+                    gestion: {
+                        terminal: '',
+                        tipo_cierre: 'AJUSTE_CONDICION',
+                        observaciones: detalleAjusteMove,
+                        material_retirado: [],
+                        material_entregado: [],
+                    },
+                    movimientos: [{
+                        uuid: generateUUIDv4(),
+                        codigo_material: selectedNonSerializedGroup.codigo_material,
+                        serie: null,
+                        cantidad: amount,
+                        tipo_movimiento: 'AJUSTE',
+                        condicion: moveTarget,
+                        condicion_origen: moveSource,
+                        cita: 'SISTEMA',
+                        ot: otAjusteMove,
+                        partida: 0,
+                        foto_serie: null,
+                        fecha_hora: timestampMove,
+                    }],
+                });
+                // Gestión local del outbox: PENDING hasta confirmación del backend.
+                await db.saveGestion({
+                    tipo: 'AJUSTE',
+                    ruta_id: rutaActiva?.id || 0,
+                    cita: 'SISTEMA',
+                    ot: otAjusteMove,
+                    partida: 0,
+                    tipo_cierre: 'AJUSTE_CONDICION',
+                    observaciones: detalleAjusteMove,
+                    nota_novedad: detalleAjusteMove,
+                    timestamp: timestampMove,
+                }, true);
+
+                // Stock local optimista: mueve de la condición origen a la destino.
                 await db.changeCondicionLocal(
                     selectedNonSerializedGroup.codigo_material,
                     null,
@@ -666,18 +739,6 @@ export default function StockScreen() {
                     moveTarget,
                     moveSource
                 );
-
-                await db.addMovimientoPendiente({
-                    codigo_material: selectedNonSerializedGroup.codigo_material,
-                    serie: null,
-                    cantidad: amount,
-                    tipo_movimiento: 'AJUSTE',
-                    condicion: moveTarget,
-                    cita: 'SISTEMA',
-                    ot: `C:${moveSource}->${moveTarget}`,
-                    partida: 0,
-                    fecha_hora: new Date().toISOString()
-                });
 
                 Alert.alert('Éxito', 'Stock movido correctamente');
                 setSelectedNonSerializedGroup(null); // Close modal

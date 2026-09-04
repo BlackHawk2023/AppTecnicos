@@ -23,6 +23,7 @@ import { useRoute } from '../../contexts/RouteContext';
 import { useAuth } from '../../contexts/AuthContext';
 import { useTextSize } from '../../contexts/TextSizeContext';
 import ServicioPrevioModal from '../../components/ServicioPrevioModal';
+import { generateUUIDv4 } from '../../utils/uuid';
 
 // Types
 interface MaterialItem {
@@ -52,16 +53,6 @@ const loadDatabaseService = async () => {
     }
     return databaseService;
 };
-
-/** UUID v4 sin dependencias externas (usa crypto aleatorio del runtime) */
-function generateUUIDv4(): string {
-    const bytes = new Uint8Array(16);
-    for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
-    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
-    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 1
-    const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
-    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
 
 export default function SoloStockScreen() {
     const params = useLocalSearchParams();
@@ -848,11 +839,11 @@ export default function SoloStockScreen() {
                 await db.crearOperacionPendiente(op);
             }
 
-            // 1.b) Registro local de la gestión (pestaña Gestiones + badge "aplicada").
-            // La gestión real la crea el backend de forma atómica dentro de
-            // /sync-operaciones, por eso se marca SYNCED de inmediato: el sync de
-            // gestiones (/mobile/sync/gestiones) sólo sube las PENDING y así no
-            // duplica la gestión en el backend.
+            // 1.b) Registro local de la gestión (pestaña Gestiones). La gestión
+            // real la crea el backend de forma atómica dentro de /sync-operaciones.
+            // Queda PENDING con origen_outbox=1: el sync de gestiones
+            // (/mobile/sync/gestiones) no la sube y pasa a SYNCED sólo cuando el
+            // backend confirma la operación (PROCESADA/YA_PROCESADA).
             for (const op of operaciones) {
                 const gestionOp = op.gestion || {};
                 await db.saveGestion({

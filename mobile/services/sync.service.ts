@@ -84,6 +84,61 @@ export interface SyncResult {
     timestamp?: string;
 }
 
+/**
+ * Single source-of-truth for persisting the sync attempt log so that BOTH
+ * the automatic background sync (RouteContext) and manual sync write the
+ * same record. The log is best-effort: if the local DB write fails we
+ * still return the original SyncResult (never mask a real error).
+ */
+async function trackSyncLog(
+    result: SyncResult,
+    endpoint: string,
+    detail?: string
+): Promise<SyncResult> {
+    if (Platform.OS === 'web') return result;
+    try {
+        if (!databaseService) {
+            const { createDatabaseService } = await import('../db/database');
+            databaseService = createDatabaseService();
+            await databaseService.init();
+        }
+                await (databaseService as any).saveSyncLog({
+            timestamp: result.timestamp || new Date().toISOString(),
+            success: result.success ? 1 : 0,
+            upload_success: result.success ? 1 : 0,
+            download_success: 1,
+            movimientos_enviados: 0,
+            gestiones_enviadas: 0,
+            error_detalle: detail || result.message || null,
+            duracion_ms: 0,
+        });
+    } catch (e) {
+        console.warn('SyncService: best-effort sync_log write failed:', e);
+    }
+    return result;
+}
+
+/**
+ * Marca la gestión local del outbox como ERROR cuando el backend devuelve
+ * PARTIAL / REJECTED / ERROR. La búsqueda es por operación (el outbox guarda
+ * la relación cita/ot/partida en la operación local). Best-effort: si la gestión
+ * ya no existe o la DB falla, no rompe el flujo del sync.
+ */
+async function marcarGestionOutboxError(
+    res: any,
+    operacionesPorUuid: Map<string, any>
+): Promise<void> {
+    if (!databaseService) return;
+    const op = operacionesPorUuid.get(res.operacion_uuid);
+    if (!op) return;
+    const motivo = res.detalle || res.message || res.error || 'Operación rechazada por el backend';
+    try {
+        await databaseService.markGestionStockErrorByOperacion(op.cita, op.ot, op.partida, motivo);
+    } catch (e) {
+        console.warn('SyncService: fallo al marcar gestión como ERROR (best-effort):', e);
+    }
+}
+
 class SyncService {
 
     /** Sube auditorías ya finalizadas. El UUID local hace seguro reintentar. */
@@ -606,7 +661,10 @@ class SyncService {
 
             const operaciones = await databaseService.getOperacionesPendientes();
             if (!operaciones || operaciones.length === 0) {
-                return { success: true, message: 'No hay operaciones pendientes' };
+                return trackSyncLog(
+                    { success: true, message: 'No hay operaciones pendientes', timestamp: new Date().toISOString() },
+                    '/mobile/stock/sync-operaciones'
+                );
             }
 
             console.log(`SyncService: Sincronizando ${operaciones.length} operaciones pendientes...`);
@@ -617,7 +675,7 @@ class SyncService {
             }
 
             // Construir payload por operación con sus movimientos.
-            const operacionesPayload = [];
+            const operacionesPayload: any[] = [];
             for (const op of operaciones) {
                 const movimientos = await databaseService.getMovimientosPendientesPorOperacion(op.operacion_uuid);
                 let gestion = {};
@@ -627,7 +685,7 @@ class SyncService {
                     console.error(`SyncService: gestión inválida en ${op.operacion_uuid}`, e);
                 }
 
-                const movimientosPayload = [];
+                const movimientosPayload: any[] = [];
                 for (const m of movimientos) {
                     let foto_serie_base64: string | null = null;
                     if (m.foto_serie) {
@@ -640,6 +698,7 @@ class SyncService {
                         serie: m.serie,
                         cantidad: m.cantidad,
                         condicion: m.condicion || 'BUENO',
+                        condicion_origen: m.condicion_origen || null,
                         foto_serie: foto_serie_base64,
                         fecha_hora: m.fecha_hora,
                     });
@@ -656,7 +715,8 @@ class SyncService {
                     movimientos: movimientosPayload,
                 });
             }
-const response = await api.post('/mobile/stock/sync-operaciones', {
+
+            const response = await api.post('/mobile/stock/sync-operaciones', {
                 operaciones: operacionesPayload
             });
 
@@ -665,7 +725,12 @@ const response = await api.post('/mobile/stock/sync-operaciones', {
                 for (const op of operaciones) {
                     await databaseService.marcarOperacionEstado(op.operacion_uuid, 'PENDING');
                 }
-                return { success: false, message: response.data?.detail || 'Error en sincronización de operaciones' };
+                const resFinal = {
+                    success: false,
+                    message: response.data?.detail || 'Error en sincronización de operaciones',
+                    timestamp: new Date().toISOString()
+                };
+                return trackSyncLog(resFinal, '/mobile/stock/sync-operaciones', resFinal.message);
             }
 
             const resultados = response.data.resultados || [];
@@ -675,24 +740,18 @@ const response = await api.post('/mobile/stock/sync-operaciones', {
 
             // Mapa para resolver la gestión local por operación: se marca SYNCED
             // recién cuando el backend confirma la operación (PROCESADA/YA_PROCESADA).
-            const operacionesPorUuid = new Map<string, any>();
+            const operacionesPorUuid = new Map();
             for (const op of operaciones) {
                 operacionesPorUuid.set(op.operacion_uuid, op);
             }
 
-            // Reconciliar stock local con el del backend (fuente de verdad).
-            if (Array.isArray(response.data?.stock_actualizado)) {
-                await databaseService.saveStockLocal(response.data.stock_actualizado);
-            }
-
             for (const res of resultados) {
                 try {
-                    switch (res.estado) {
+                    const estadoBackend = res.estado || res.resultado;
+                    switch (estadoBackend) {
                         case 'PROCESADA':
                         case 'YA_PROCESADA':
                             await databaseService.confirmarYLimpiarOperacion(res.operacion_uuid);
-                            // La gestión local STOCK del outbox pasa a SYNCED: el
-                            // backend ya la creó atómicamente dentro de la operación.
                             const opConfirmada = operacionesPorUuid.get(res.operacion_uuid);
                             if (opConfirmada) {
                                 await databaseService.markGestionStockSyncByOperacion(
@@ -709,6 +768,7 @@ const response = await api.post('/mobile/stock/sync-operaciones', {
                                 'REJECTED',
                                 JSON.stringify(res)
                             );
+                            await marcarGestionOutboxError(res, operacionesPorUuid);
                             parciales += 1;
                             break;
                         case 'REJECTED':
@@ -718,27 +778,33 @@ const response = await api.post('/mobile/stock/sync-operaciones', {
                                 'REJECTED',
                                 JSON.stringify(res)
                             );
+                            await marcarGestionOutboxError(res, operacionesPorUuid);
                             rechazadas += 1;
                             break;
                         default:
-                            // Estado desconocido: volver a PENDING (sin regenerar UUID).
                             await databaseService.marcarOperacionEstado(res.operacion_uuid, 'PENDING');
                     }
                 } catch (estadoError) {
-                    console.error(`SyncService: Error procesando resultado de ${res.operacion_uuid}:`, estadoError);
+                    console.error(`SyncService: Error procesando resultado de ${res.operacion_uuid}`, estadoError);
                 }
             }
 
             console.log(`SyncService: ${confirmadas} confirmadas, ${parciales} parciales, ${rechazadas} rechazadas`);
 
-            return {
-                success: true,
-                message: `${confirmadas} operaciones sincronizadas`,
-                timestamp: new Date().toISOString()
+            // Una respuesta HTTP correcta no implica que todas las operaciones
+            // hayan sido aplicadas. Informarlo como fallo evita que RouteContext
+            // descargue y pise el stock local cuando quedó una operación parcial
+            // o rechazada para revisión.
+            const tieneResultadosNoConfirmados = parciales > 0 || rechazadas > 0;
+            const resFinal = {
+                success: !tieneResultadosNoConfirmados,
+                message: tieneResultadosNoConfirmados
+                    ? `${confirmadas} confirmadas; ${parciales} parciales; ${rechazadas} rechazadas`
+                    : `${confirmadas} operaciones sincronizadas`,
             };
+            return trackSyncLog(resFinal, '/mobile/stock/sync-operaciones', resFinal.message);
         } catch (error: any) {
-            console.error('SyncService: Error syncing operaciones:', error);
-            // Vuelvo SENDING → PENDING para reintento futuro con los mismos UUIDs.
+            console.error('SyncService: Error en syncOperaciones:', error);
             try {
                 if (databaseService) {
                     const pendientes = await databaseService.getOperacionesPendientes();
@@ -751,10 +817,12 @@ const response = await api.post('/mobile/stock/sync-operaciones', {
             } catch (revertError) {
                 console.error('SyncService: Error revirtiendo SENDING → PENDING:', revertError);
             }
-            return {
+            const resFinal = {
                 success: false,
-                message: error.message || 'Error sincronizando operaciones'
+                message: error.response?.data?.detail || error.message || 'Error sincronizando operaciones',
+                timestamp: new Date().toISOString()
             };
+            return trackSyncLog(resFinal, '/mobile/stock/sync-operaciones', resFinal.message);
         }
     }
     // ==================== TRANSFERENCIAS (NUEVO SISTEMA) ====================

@@ -34,6 +34,7 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
 import { PAYWAY_LOGO_BASE64, DISCAR_LOGO_BASE64 } from '../../constants/logo';
+import { generateUUIDv4 } from '../../utils/uuid';
 
 // Types
 interface MaterialItem {
@@ -1259,98 +1260,7 @@ export default function EjecucionScreen() {
         }
     };
 
-    // Register stock movements for all completed partidas
-    const registerStockMovements = async () => {
-        let registrados = 0;
-        try {
-            const db = await loadDatabaseService();
-            if (!db) {
-                console.warn('RegisterStockMovements: DB no disponible, no se registraron movimientos');
-                return;
-            }
-
-            // Iterate through all selected partidas and their materials
-            for (const partidaNum of selectedPartidas) {
-                const partidaData = partidaFormData.get(partidaNum);
-                if (!partidaData) {
-                    // Diagnóstico: registro silencioso de movimientos = pérdidas silenciosas.
-                    console.warn(
-                        `RegisterStockMovements: partida ${partidaNum} SIN datos en partidaFormData ` +
-                        `(partidas con datos: ${Array.from(partidaFormData.keys()).join(',') || 'ninguna'})`
-                    );
-                    continue;
-                }
-
-                // Register materials retirados (RETIRO = technician picks up)
-                for (const item of partidaData.material_retirado || []) {
-                    if (item.material && item.serie_o_cantidad) {
-                        const isSerialized = item.unidad_medida === 'SERIALIZADO';
-                        await db.addMovimientoPendiente({
-                            codigo_material: item.material,
-                            serie: isSerialized ? item.serie_o_cantidad : null,
-                            cantidad: isSerialized ? 1 : parseInt(item.serie_o_cantidad) || 1,
-                            tipo_movimiento: 'RETIRO',
-                            cita: cita as string,
-                            ot: ot as string,
-                            partida: partidaNum,
-                            foto_serie: item.foto_serie || null,
-                            fecha_hora: new Date().toISOString(),
-                            condicion: item.condicion
-                        });
-
-                        // Update local stock - add to technician
-                        await db.updateStockLocal(
-                            item.material,
-                            isSerialized ? item.serie_o_cantidad : null,
-                            isSerialized ? 1 : parseInt(item.serie_o_cantidad) || 1,
-                            'add',
-                            item.condicion
-                        );
-                        registrados++;
-                    }
-                }
-
-                // Register materials entregados (ENTREGA = technician delivers)
-                for (const item of partidaData.material_entregado || []) {
-                    if (item.material && item.serie_o_cantidad) {
-                        const isSerialized = item.unidad_medida === 'SERIALIZADO';
-                        await db.addMovimientoPendiente({
-                            codigo_material: item.material,
-                            serie: isSerialized ? item.serie_o_cantidad : null,
-                            cantidad: isSerialized ? 1 : parseInt(item.serie_o_cantidad) || 1,
-                            tipo_movimiento: 'ENTREGA',
-                            cita: cita as string,
-                            ot: ot as string,
-                            partida: partidaNum,
-                            foto_serie: item.foto_serie || null,
-                            fecha_hora: new Date().toISOString(),
-                            condicion: item.condicion
-                        });
-
-                        // Update local stock - remove from technician
-                        await db.updateStockLocal(
-                            item.material,
-                            isSerialized ? item.serie_o_cantidad : null,
-                            isSerialized ? 1 : parseInt(item.serie_o_cantidad) || 1,
-                            'remove',
-                            item.condicion
-                        );
-                        registrados++;
-                    }
-                }
-            }
-
-            console.log(
-                `RegisterStockMovements: ${registrados} movimientos registrados en SQLite ` +
-                `(partidas: ${selectedPartidas.join(',') || 'ninguna'})`
-            );
-        } catch (error) {
-            console.error('Error registering stock movements:', error);
-            throw error;
-        }
-    };
-
-    // Step 1: Generate renders HTML and shows preview modal
+            // Step 1: Generate renders HTML and shows preview modal
     // For multi-partida, we generate one order per partida sequentially
     const [generatingPartidaIndex, setGeneratingPartidaIndex] = useState(0);
 
@@ -1596,19 +1506,31 @@ export default function EjecucionScreen() {
                 gestiones.push(gestion);
             }
 
-            // Save all gestiones to database
-            for (const gestion of gestiones) {
-                await databaseService.saveGestion(gestion);
-            }
+            // No guardar estas gestiones por el canal histórico: el outbox
+            // transaccional las persiste junto con sus movimientos y el backend
+            // crea la única HistorialGestion asociada a la operación.
 
-            // Register stock movements
+            // Register stock movements via outbox (idéntico al call site de generar orden)
             try {
-                await registerStockMovements();
+                const dbServicio = await loadDatabaseService();
+                if (dbServicio) {
+                    await dbServicio.registerStockMovementsOutbox({
+                        cita: cita as string,
+                        ot: ot as string,
+                        formData: partidaFormData,
+                        selectedPartidas,
+                        user,
+                        rutaActiva,
+                        formDataGlobal: formData,
+                        uploadedOrderPhotos,
+                        technicianLocation,
+                    });
+                }
             } catch (stockError) {
                 console.error('Stock movements failed after saving gestiones:', stockError);
                 Alert.alert(
                     'Aviso de Stock',
-                    'Las órdenes se guardaron correctamente pero hubo un error al actualizar el stock local. Los movimientos se sincronizarán con el servidor. Contacte a su supervisor si el problema persiste.',
+                    'No se pudo guardar la operación de stock localmente. Reintentá cerrar la orden antes de continuar; si persiste, contactá a tu supervisor.',
                     [{ text: 'Entendido' }]
                 );
             }
@@ -1756,38 +1678,10 @@ export default function EjecucionScreen() {
                     }
                 );
 
-                // Persist order to SQLite for sync
-                try {
-                    const db = await loadDatabaseService();
-                    if (db) {
-                        await db.saveGestion({
-                            tipo: 'ORDEN',
-                            ruta_id: rutaActiva?.id || 0,
-                            cita: cita as string,
-                            ot: ot as string,
-                            partida: processingPartida,
-                            terminal: processingPartidaData?.terminal || clientInfo?.terminal || '',
-                            tipo_cierre: processingPartidaData?.tipo_cierre || '',
-                            detalle_trabajo: processingPartidaData?.detalle_trabajo || '',
-                            observaciones: processingPartidaData?.observaciones || '',
-                            material_retirado: JSON.stringify(processingPartidaData?.material_retirado || []),
-                            material_entregado: JSON.stringify(processingPartidaData?.material_entregado || []),
-                            cliente_nombre: formData.cliente_nombre,
-                            cliente_dni: formData.cliente_dni,
-                            cliente_firma: formData.cliente_firma,
-                            tecnico_nombre: formData.tecnico_nombre,
-                            tecnico_dni: formData.tecnico_dni,
-                            tecnico_firma: formData.tecnico_firma,
-                            order_image_path: jpgPath,
-                            latitude: technicianLocation?.latitude,
-                            longitude: technicianLocation?.longitude,
-                            timestamp: now.toISOString()
-                        });
-                        console.log(`Order for partida ${processingPartida} saved to SQLite`);
-                    }
-                } catch (dbError) {
-                    console.error('Error saving order to SQLite:', dbError);
-                }
+                // La persistencia local de la gestión se hace una sola vez al
+                // finalizar todas las partidas, dentro de registerStockMovementsOutbox.
+                // Guardarla acá también la enviaba por /sync/gestiones y
+                // duplicaba el historial frente a /sync-operaciones.
 
                 // Check if there are more partidas to process
                 if (generatingPartidaIndex < selectedPartidas.length - 1) {
@@ -1807,10 +1701,38 @@ export default function EjecucionScreen() {
                     return;
                 }
 
-                // All partidas processed - send all via email
+                // All partidas processed. Persistir primero la operación local:
+                // al abrir el cliente de correo la app pasa a background/foreground y
+                // puede disparar un sync automático que también usa SQLite. Así el
+                // outbox queda atómico antes de ceder el control a otra app.
                 setShowPreviewModal(false);
                 setPreviewHtml('');
                 setIsCapturing(false);
+
+                try {
+                    const dbServicio = await loadDatabaseService();
+                    if (dbServicio) {
+                        await dbServicio.registerStockMovementsOutbox({
+                            cita: cita as string,
+                            ot: ot as string,
+                            formData: partidaFormData,
+                            selectedPartidas,
+                            user,
+                            rutaActiva,
+                            formDataGlobal: formData,
+                            uploadedOrderPhotos,
+                            technicianLocation,
+                        });
+                    }
+                } catch (stockError) {
+                    console.error('No se pudo persistir la operación de stock local:', stockError);
+                    Alert.alert(
+                        'Aviso de Stock',
+                        'No se pudo guardar la operación de stock localmente. Reintentá cerrar la orden antes de continuar; si persiste, contactá a tu supervisor.',
+                        [{ text: 'Entendido' }]
+                    );
+                    return;
+                }
 
                 // Build list of all generated paths (including current one)
                 const allPaths = [...generatedOrderPaths, jpgPath];
@@ -1859,18 +1781,6 @@ export default function EjecucionScreen() {
 
                 // Clear accumulated paths for next use
                 setGeneratedOrderPaths([]);
-
-                // Register stock movements before navigating
-                try {
-                    await registerStockMovements();
-                } catch (stockError) {
-                    console.error('Stock movements failed after saving gestiones:', stockError);
-                    Alert.alert(
-                        'Aviso de Stock',
-                        'El servicio se guardó correctamente pero hubo un error al actualizar el stock local. Los movimientos se sincronizarán con el servidor. Contacte a su supervisor si el problema persiste.',
-                        [{ text: 'Entendido' }]
-                    );
-                }
 
                 // Navigate to detail
                 await clearDraft();

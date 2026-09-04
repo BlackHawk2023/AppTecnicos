@@ -1,18 +1,10 @@
 // Database Service - Native implementation with SQLite
 // This file is only loaded on iOS/Android platforms
 import * as SQLite from 'expo-sqlite';
+// Única implementación de UUID v4 en la app (clave de dedup local, no criptográfica).
+import { generateUUIDv4 as generateUUID } from '../utils/uuid';
 
 const DB_NAME = 'stdiscar.db';
-
-/** UUID v4 generator sin dependencias externas */
-function generateUUID(): string {
-    const bytes = new Uint8Array(16);
-    for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
-    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
-    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 1
-    const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
-    return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
-}
 
 export interface DatabaseService {
     init(): Promise<void>;
@@ -28,6 +20,7 @@ export interface DatabaseService {
     getPendingGestiones(): Promise<GestionRecord[]>;
     markGestionSynced(id: number): Promise<void>;
     markGestionStockSyncByOperacion(cita: string, ot: string, partida: number): Promise<void>;
+    markGestionStockErrorByOperacion(cita: string, ot: string, partida: number, motivo: string): Promise<void>;
     getGestionByService(cita: string, ot: string, partida: number): Promise<GestionRecord | null>;
     getGestionesByRuta(rutaId: number): Promise<GestionRecord[]>;
     // Cleanup methods
@@ -103,7 +96,7 @@ export interface DatabaseService {
 
 // Type for saving a new gestion
 export interface GestionData {
-    tipo: 'ORDEN' | 'NOVEDAD' | 'STOCK' | 'REAGENDAMIENTO';
+    tipo: 'ORDEN' | 'NOVEDAD' | 'STOCK' | 'REAGENDAMIENTO' | 'AJUSTE';
     ruta_id: number;  // Route ID for tracking
     cita: string;
     ot: string;
@@ -133,7 +126,7 @@ export interface GestionData {
 // Type for reading gestion from DB
 export interface GestionRecord extends GestionData {
     id: number;
-    status: 'PENDING' | 'SYNCED' | 'FAILED';
+    status: 'PENDING' | 'SYNCED' | 'FAILED' | 'ERROR';
     created_at: number;
     ruta_id: number;
 }
@@ -185,8 +178,9 @@ export interface MovimientoPendiente {
     codigo_material: string;
     serie: string | null;
     cantidad: number;
-    tipo_movimiento: 'RETIRO' | 'ENTREGA';
+    tipo_movimiento: 'RETIRO' | 'ENTREGA' | 'AJUSTE';
     condicion?: string;  // Condición del material al momento del movimiento
+    condicion_origen?: string | null;  // AJUSTE no serializado: condición de origen
     cita: string;
     ot: string;
     partida: number;
@@ -265,6 +259,25 @@ class DatabaseServiceImpl implements DatabaseService {
     private db: any = null;
     private initPromise: Promise<void> | null = null;
     private isInitialized: boolean = false;
+
+    /** SQLite puede estar ocupado por el sync automático al cerrar una orden.
+     * Reintentar la transacción exclusiva mantiene la operación atómica sin
+     * perder el outbox por un bloqueo transitorio. */
+    private async withExclusiveTransactionRetry(db: any, work: (txn: any) => Promise<void>): Promise<void> {
+        let lastError: any;
+        for (let attempt = 0; attempt < 4; attempt++) {
+            try {
+                await db.withExclusiveTransactionAsync(work);
+                return;
+            } catch (error: any) {
+                lastError = error;
+                const locked = String(error?.message || error).toLowerCase().includes('database is locked');
+                if (!locked || attempt === 3) throw error;
+                await new Promise(resolve => setTimeout(resolve, 150 * (attempt + 1)));
+            }
+        }
+        throw lastError;
+    }
 
     async getDb(): Promise<any> {
         if (!this.db) {
@@ -534,6 +547,7 @@ class DatabaseServiceImpl implements DatabaseService {
                 cantidad INTEGER DEFAULT 1,
                 tipo_movimiento TEXT NOT NULL,
                 condicion TEXT,
+                condicion_origen TEXT,
                 cita TEXT NOT NULL,
                 ot TEXT NOT NULL,
                 partida INTEGER NOT NULL,
@@ -585,6 +599,13 @@ class DatabaseServiceImpl implements DatabaseService {
             await db.execAsync(`ALTER TABLE movimientos_pendientes ADD COLUMN operacion_uuid TEXT`);
         } catch (e) {
             // La columna ya existe en instalaciones actualizadas.
+        }
+
+        // Fase 3: condición origen para AJUSTE de material no serializado.
+        try {
+            await db.execAsync(`ALTER TABLE movimientos_pendientes ADD COLUMN condicion_origen TEXT`);
+        } catch (e) {
+            // Column already exists - expected on new installs
         }
 
         // Index para movimientos no sincronizados
@@ -927,11 +948,30 @@ class DatabaseServiceImpl implements DatabaseService {
 
     async markGestionStockSyncByOperacion(cita: string, ot: string, partida: number): Promise<void> {
         const db = await this.getDb();
+        // Honestidad del estado (fase 3): sólo las gestiones creadas por el
+        // outbox (origen_outbox = 1) pasan a SYNCED cuando el backend confirma
+        // la operación (PROCESADA / YA_PROCESADA). Las legacy las sincroniza
+        // /mobile/sync/gestiones con markGestionSynced(id).
         await db.runAsync(
-            `UPDATE gestiones SET status = 'SYNCED' WHERE tipo = 'STOCK' AND cita = ? AND ot = ? AND partida = ? AND status = 'PENDING'`,
+            `UPDATE gestiones SET status = 'SYNCED' WHERE tipo IN ('STOCK', 'ORDEN', 'AJUSTE') AND cita = ? AND ot = ? AND partida = ? AND status = 'PENDING' AND origen_outbox = 1`,
             [cita, ot, partida]
         );
-        console.log(`DatabaseService: Gestión STOCK marcada SYNCED para ${cita}/${ot}/P.${partida}`);
+        console.log(`DatabaseService: Gestión outbox marcada SYNCED para ${cita}/${ot}/P.${partida}`);
+    }
+
+    async markGestionStockErrorByOperacion(cita: string, ot: string, partida: number, motivo: string): Promise<void> {
+        const db = await this.getDb();
+        // Revisión visible (fase 3): la operación llegó como PARTIAL/REJECTED/
+        // ERROR; la gestión local del outbox queda en ERROR con el motivo en
+        // observaciones y nota_novedad (ambos se muestran en el detalle).
+        await db.runAsync(
+            `UPDATE gestiones SET status = 'ERROR',
+                observaciones = COALESCE(observaciones, '') || ?,
+                nota_novedad = COALESCE(nota_novedad, '') || ?
+             WHERE tipo IN ('STOCK', 'ORDEN', 'AJUSTE') AND cita = ? AND ot = ? AND partida = ? AND status = 'PENDING' AND origen_outbox = 1`,
+            [`\n[ERROR SYNC] ${motivo}`, `\n[ERROR SYNC] ${motivo}`, cita, ot, partida]
+        );
+        console.log(`DatabaseService: Gestión outbox marcada ERROR para ${cita}/${ot}/P.${partida}: ${motivo}`);
     }
 
     async getGestionByService(cita: string, ot: string, partida: number): Promise<GestionRecord | null> {
@@ -1258,9 +1298,9 @@ class DatabaseServiceImpl implements DatabaseService {
         // Generar UUID para deduplicación
         const uuid = mov.uuid || generateUUID();
         const result = await db.runAsync(
-            `INSERT INTO movimientos_pendientes (uuid, codigo_material, serie, cantidad, tipo_movimiento, condicion, cita, ot, partida, foto_serie, fecha_hora, synced) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
-            [uuid, mov.codigo_material, mov.serie, mov.cantidad, mov.tipo_movimiento, mov.condicion || null, mov.cita, mov.ot, mov.partida, mov.foto_serie || null, mov.fecha_hora]
+            `INSERT INTO movimientos_pendientes (uuid, codigo_material, serie, cantidad, tipo_movimiento, condicion, condicion_origen, cita, ot, partida, foto_serie, fecha_hora, synced) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+            [uuid, mov.codigo_material, mov.serie, mov.cantidad, mov.tipo_movimiento, mov.condicion || null, mov.condicion_origen || null, mov.cita, mov.ot, mov.partida, mov.foto_serie || null, mov.fecha_hora]
         );
         console.log(`DatabaseService: Added pending movement ${mov.tipo_movimiento} for ${mov.codigo_material} (uuid: ${uuid})`);
         return result.lastInsertRowId;
@@ -1291,11 +1331,143 @@ class DatabaseServiceImpl implements DatabaseService {
     }
 
 // ==================== OUTBOX TRANSACCIONAL DE OPERACIONES ====================
+    // Parámetros para registerStockMovementsOutbox (ejecucion.tsx → crearOperacionPendiente)
+    registerStockMovementsOutbox(params: {
+        cita: string;
+        ot: string;
+        formData: Map<number, any>;
+        selectedPartidas: number[];
+        user: any;
+        rutaActiva: any;
+        formDataGlobal: any;
+        uploadedOrderPhotos: Map<number, string>;
+        technicianLocation: { latitude: number; longitude: number } | null;
+    }): Promise<void>;
+
+
+        async registerStockMovementsOutbox(params: {
+        cita: string;
+        ot: string;
+        formData: Map<number, any>;
+        selectedPartidas: number[];
+        user: any;
+        rutaActiva: any;
+        formDataGlobal: any;
+        uploadedOrderPhotos: Map<number, string>;
+        technicianLocation: { latitude: number; longitude: number } | null;
+    }): Promise<void> {
+        const db = await this.getDb();
+        const { cita, ot, formData, selectedPartidas, user, rutaActiva, formDataGlobal, uploadedOrderPhotos, technicianLocation } = params;
+
+        const operacionesData: { partidaNum: number; retirado: any[]; entregado: any[]; tipo_cierre: string; detalle_trabajo: string; observaciones: string }[] = [];
+        for (const partidaNum of selectedPartidas) {
+            const savedData = formData.get(partidaNum);
+            if (!savedData) continue;
+            const retirado = (savedData.material_retirado || []).filter((i: any) => i.material && i.serie_o_cantidad);
+            const entregado = (savedData.material_entregado || []).filter((i: any) => i.material && i.serie_o_cantidad);
+            operacionesData.push({ partidaNum, retirado, entregado, tipo_cierre: savedData.tipo_cierre || '', detalle_trabajo: savedData.detalle_trabajo || '', observaciones: savedData.observaciones || '' });
+        }
+
+        if (operacionesData.length === 0) {
+            console.log('RegisterStockMovements: 0 operaciones registradas en SQLite (partidas: 0)');
+            return;
+        }
+
+        console.log(`RegisterStockMovements: ${operacionesData.length} operaciones registradas en SQLite (partidas: ${operacionesData.length})`);
+        const timestamp = new Date().toISOString();
+
+        for (const op of operacionesData) {
+            const movimientos: any[] = [];
+            for (const item of op.retirado) {
+                if (item.material && item.serie_o_cantidad) {
+                    const isSerialized = item.unidad_medida === 'SERIALIZADO';
+                    movimientos.push({
+                        uuid: generateUUID(), codigo_material: item.material,
+                        serie: isSerialized ? item.serie_o_cantidad : null,
+                        cantidad: isSerialized ? 1 : parseInt(item.serie_o_cantidad) || 1,
+                        tipo_movimiento: 'RETIRO', cita, ot, partida: op.partidaNum,
+                        foto_serie: item.foto_serie || null, fecha_hora: timestamp,
+                        condicion: item.condicion,
+                    });
+                }
+            }
+            for (const item of op.entregado) {
+                if (item.material && item.serie_o_cantidad) {
+                    const isSerialized = item.unidad_medida === 'SERIALIZADO';
+                    movimientos.push({
+                        uuid: generateUUID(), codigo_material: item.material,
+                        serie: isSerialized ? item.serie_o_cantidad : null,
+                        cantidad: isSerialized ? 1 : parseInt(item.serie_o_cantidad) || 1,
+                        tipo_movimiento: 'ENTREGA', cita, ot, partida: op.partidaNum,
+                        foto_serie: item.foto_serie || null, fecha_hora: timestamp,
+                        condicion: item.condicion,
+                    });
+                }
+            }
+
+            const operacionUuid = generateUUID();
+            await this._persistirOperacionOrden(operacionUuid, movimientos, op, cita, ot, timestamp, formDataGlobal, uploadedOrderPhotos, technicianLocation, rutaActiva, user);
+        }
+    }
+
+    async _persistirOperacionOrden(operacionUuid: string, movimientos: any[], op: any, cita: string, ot: string, timestamp: string, formDataGlobal: any, uploadedOrderPhotos: Map<number, string>, technicianLocation: { latitude: number; longitude: number } | null, rutaActiva: any, user: any): Promise<void> {
+        const db = await this.getDb();
+        await this.withExclusiveTransactionRetry(db, async (txn: any) => {
+            await txn.runAsync(
+                `INSERT OR REPLACE INTO operaciones_pendientes
+                    (operacion_uuid, tipo_gestion, cita, ot, partida, fecha_hora_creacion, gestion_json, estado, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)`,
+                [operacionUuid, 'ORDEN', cita, ot, op.partidaNum, timestamp,
+                 JSON.stringify({
+                     terminal: '', tipo_cierre: op.tipo_cierre, detalle_trabajo: op.detalle_trabajo,
+                     observaciones: op.observaciones, material_retirado: op.retirado, material_entregado: op.entregado,
+                     cliente_nombre: formDataGlobal.cliente_nombre, cliente_dni: formDataGlobal.cliente_dni,
+                     firma_cliente: formDataGlobal.cliente_firma, latitud: technicianLocation?.latitude ?? null,
+                     longitud: technicianLocation?.longitude ?? null, imagenes: [],
+                 }), Date.now()]
+            );
+
+            await txn.runAsync(`DELETE FROM movimientos_pendientes WHERE operacion_uuid = ?`, [operacionUuid]);
+
+            for (const mov of movimientos) {
+                await txn.runAsync(
+                    `INSERT INTO movimientos_pendientes
+                        (uuid, operacion_uuid, codigo_material, serie, cantidad, tipo_movimiento, condicion, condicion_origen, cita, ot, partida, foto_serie, fecha_hora, synced)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+                    [mov.uuid, operacionUuid, mov.codigo_material, mov.serie || null, mov.cantidad,
+                     mov.tipo_movimiento, mov.condicion || 'BUENO', (mov as any).condicion_origen || null, mov.cita, mov.ot, mov.partida,
+                     mov.foto_serie || null, mov.fecha_hora]
+                );
+            }
+
+            await txn.runAsync(
+                `INSERT INTO gestiones
+                    (tipo, ruta_id, cita, ot, partida, terminal, tipo_cierre, detalle_trabajo,
+                     observaciones, material_retirado, material_entregado,
+                     cliente_nombre, cliente_dni, cliente_firma,
+                     tecnico_nombre, tecnico_dni, tecnico_firma,
+                     order_image_path, nota_novedad, novedad_image_path,
+                     fecha_reagendada, turno_reagendamiento,
+                     latitude, longitude, timestamp, status, created_at, origen_outbox)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, 1)`,
+                ['ORDEN', rutaActiva?.id || 0, cita, ot, op.partidaNum, '',
+                 op.tipo_cierre, op.detalle_trabajo,
+                 `[ORDEN CARGADA] ${op.observaciones || ''}`,
+                 JSON.stringify(op.retirado), JSON.stringify(op.entregado),
+                 formDataGlobal.cliente_nombre || null, formDataGlobal.cliente_dni || null,
+                 formDataGlobal.cliente_firma || null,
+                 formDataGlobal.tecnico_nombre || user?.nombrecompleto || '',
+                 formDataGlobal.tecnico_dni || '', formDataGlobal.tecnico_firma || null,
+                 uploadedOrderPhotos.get(op.partidaNum) || null, null, null, null, null,
+                 technicianLocation?.latitude ?? null, technicianLocation?.longitude ?? null,
+                 timestamp, Date.now()]
+            );
+        });
+    }
 
     async crearOperacionPendiente(op: NuevaOperacionPendiente): Promise<void> {
         const db = await this.getDb();
-        // Transacción única: operación + gestión + movimientos (todo-o-nada).
-        await db.withExclusiveTransactionAsync(async (txn: any) => {
+        await this.withExclusiveTransactionRetry(db, async (txn: any) => {
             await txn.runAsync(
                 `INSERT OR REPLACE INTO operaciones_pendientes
                     (operacion_uuid, tipo_gestion, cita, ot, partida, fecha_hora_creacion, gestion_json, estado, created_at)
@@ -1311,8 +1483,6 @@ class DatabaseServiceImpl implements DatabaseService {
                     Date.now()
                 ]
             );
-            // Eliminar movimientos previos de la operación (si se reintenta localmente
-            // con el mismo UUID) y volver a insertar con sus UUIDs estables.
             await txn.runAsync(
                 `DELETE FROM movimientos_pendientes WHERE operacion_uuid = ?`,
                 [op.operacion_uuid]
@@ -1321,8 +1491,8 @@ class DatabaseServiceImpl implements DatabaseService {
                 const uuid = mov.uuid || generateUUID();
                 await txn.runAsync(
                     `INSERT INTO movimientos_pendientes
-                        (uuid, operacion_uuid, codigo_material, serie, cantidad, tipo_movimiento, condicion, cita, ot, partida, foto_serie, fecha_hora, synced)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+                        (uuid, operacion_uuid, codigo_material, serie, cantidad, tipo_movimiento, condicion, condicion_origen, cita, ot, partida, foto_serie, fecha_hora, synced)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
                     [
                         uuid,
                         op.operacion_uuid,
@@ -1331,6 +1501,7 @@ class DatabaseServiceImpl implements DatabaseService {
                         mov.cantidad,
                         mov.tipo_movimiento,
                         mov.condicion || null,
+                        (mov as any).condicion_origen || null,
                         mov.cita,
                         mov.ot,
                         mov.partida,
@@ -1382,7 +1553,7 @@ class DatabaseServiceImpl implements DatabaseService {
         const db = await this.getDb();
         // Confirmar y limpiar en una sola transacción: la operación y sus movimientos
         // dejan de existir localmente; el backend ya los tiene como fuente de verdad.
-        await db.withExclusiveTransactionAsync(async (txn: any) => {
+        await this.withExclusiveTransactionRetry(db, async (txn: any) => {
             await txn.runAsync(`DELETE FROM movimientos_pendientes WHERE operacion_uuid = ?`, [operacionUuid]);
             await txn.runAsync(`DELETE FROM operaciones_pendientes WHERE operacion_uuid = ?`, [operacionUuid]);
         });

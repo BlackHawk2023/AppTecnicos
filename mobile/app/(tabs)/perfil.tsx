@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Image, Modal, Alert, Platform, TextInput, ScrollView, ActivityIndicator, Share } from 'react-native';
 import { useAuth } from '../../contexts/AuthContext';
 import { useTextSize } from '../../contexts/TextSizeContext';
 import { useRoute } from '../../contexts/RouteContext';
 import { StatusBar } from 'expo-status-bar';
+import { useFocusEffect } from 'expo-router';
 import SignatureScreen, { SignatureViewRef } from 'react-native-signature-canvas';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -642,6 +643,15 @@ function SyncDiagnosticsSection({ username, onSync }: { username: string; onSync
         loadDiagnostics();
     }, []);
 
+    // Recarga el diagnóstico cada vez que la pestaña vuelve a ganar el foco,
+    // no solo al primer montaje. Refresca "Estado de Sincronización" tras un
+    // auto-sync sin necesidad de salir y volver a entrar.
+    useFocusEffect(
+        useCallback(() => {
+            loadDiagnostics();
+        }, [])
+    );
+
     const loadDiagnostics = async () => {
         if (Platform.OS === 'web') { setLoading(false); return; }
         try {
@@ -750,12 +760,24 @@ function SyncDiagnosticsSection({ username, onSync }: { username: string; onSync
             if (!dbService) return;
             const db = await dbService.getDb();
 
-            // Fetch full rows, not just counts
+            // El flujo legacy sólo puede mostrar movimientos sin operación.
+            // Los que tienen operacion_uuid se sincronizan exclusivamente por
+            // /sync-operaciones y se informan por separado.
             const pendingMovs: any[] = await db.getAllAsync(
-                'SELECT * FROM movimientos_pendientes WHERE synced = 0 ORDER BY fecha_hora ASC'
+                'SELECT * FROM movimientos_pendientes WHERE synced = 0 AND operacion_uuid IS NULL ORDER BY fecha_hora ASC'
+            );
+            const outboxMovs: any[] = await db.getAllAsync(
+                `SELECT m.*, o.tipo_gestion AS operacion_tipo
+                 FROM movimientos_pendientes m
+                 JOIN operaciones_pendientes o ON o.operacion_uuid = m.operacion_uuid
+                 WHERE m.synced = 0
+                 ORDER BY m.fecha_hora ASC`
             );
             const pendingGests: any[] = await db.getAllAsync(
                 "SELECT * FROM gestiones WHERE status = 'PENDING' ORDER BY created_at ASC"
+            );
+            const operaciones: any[] = await db.getAllAsync(
+                "SELECT operacion_uuid, tipo_gestion, cita, ot, partida, estado, resultado_json, created_at FROM operaciones_pendientes ORDER BY created_at ASC"
             );
 
             const lines: string[] = [
@@ -782,6 +804,19 @@ function SyncDiagnosticsSection({ username, onSync }: { username: string; onSync
             }
             lines.push('');
 
+            // ── Movimientos contenidos en operaciones (fase 2) ───────────
+            lines.push(`MOVIMIENTOS EN OPERACIONES OUTBOX (${outboxMovs.length}):`);
+            if (outboxMovs.length === 0) {
+                lines.push('  Ninguno.');
+            } else {
+                for (const m of outboxMovs) {
+                    const serieStr = m.serie ? ` [SN:${m.serie}]` : '';
+                    lines.push(`  · ${m.operacion_tipo} ${m.tipo_movimiento} ${m.codigo_material}${serieStr} x${m.cantidad}`);
+                    lines.push(`      OT:${m.ot} Cita:${m.cita} Part:${m.partida} · operación:${String(m.operacion_uuid).slice(0, 8)}…`);
+                }
+            }
+            lines.push('');
+
             // ── Gestiones ─────────────────────────────────────────────────
             lines.push(`GESTIONES PENDIENTES (${pendingGests.length}):`);
             if (pendingGests.length === 0) {
@@ -796,6 +831,18 @@ function SyncDiagnosticsSection({ username, onSync }: { username: string; onSync
                     if (g.tipo_cierre) lines.push(`      Cierre: ${g.tipo_cierre}`);
                     if (g.detalle_trabajo) lines.push(`      Detalle: ${String(g.detalle_trabajo).slice(0, 80)}`);
                     if (g.nota_novedad) lines.push(`      Novedad: ${String(g.nota_novedad).slice(0, 80)}`);
+                }
+            }
+            lines.push('');
+
+            // ── Operaciones transaccionales (fase 2) ──────────────────────
+            lines.push(`OPERACIONES OUTBOX (${operaciones.length}):`);
+            if (operaciones.length === 0) {
+                lines.push('  Ninguna.');
+            } else {
+                for (const op of operaciones) {
+                    lines.push(`  · ${op.tipo_gestion} ${String(op.operacion_uuid).slice(0, 8)}… | ${op.estado} | OT:${op.ot} Cita:${op.cita} Part:${op.partida}`);
+                    if (op.resultado_json) lines.push(`      Resultado: ${String(op.resultado_json).slice(0, 220)}`);
                 }
             }
             lines.push('');
