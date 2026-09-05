@@ -1,3 +1,4 @@
+import ScannerCamera from '../../components/ScannerCamera';
 import React, { useState, useEffect, useRef } from 'react';
 import {
     View,
@@ -102,8 +103,8 @@ export default function SoloStockScreen() {
     // Scanner
     const [permission, requestPermission] = useCameraPermissions();
     const [showScannerModal, setShowScannerModal] = useState(false);
-    const [scannerTarget, setScannerTarget] = useState<{ type: 'retirado' | 'entregado'; id: string } | null>(null);
-    const cameraRef = useRef<any>(null);
+    const [scannerTarget, setScannerTarget] = useState<{ type: 'retirado' | 'entregado'; id: string; field: 'serie' | 'material' } | null>(null);
+    const cameraRef = useRef<CameraView>(null);
 
     // Material picker
     const [showPickerModal, setShowPickerModal] = useState(false);
@@ -329,7 +330,7 @@ export default function SoloStockScreen() {
     };
 
     // Scanner
-    const openScanner = async (type: 'retirado' | 'entregado', itemId: string) => {
+    const openScanner = async (type: 'retirado' | 'entregado', itemId: string, field: 'serie' | 'material' = 'serie') => {
         if (!permission?.granted) {
             const result = await requestPermission();
             if (!result.granted) {
@@ -337,13 +338,32 @@ export default function SoloStockScreen() {
                 return;
             }
         }
-        setScannerTarget({ type, id: itemId });
+        setScannerTarget({ type, id: itemId, field });
         setShowScannerModal(true);
     };
 
     const handleBarCodeScanned = async (result: { type: string; data: string }) => {
         if (!scannerTarget) return;
-        const scannedCode = result.data;
+        const scannedCode = result.data.trim();
+        if (scannerTarget.field === 'material') {
+            try {
+                const db = await loadDatabaseService();
+                if (!db) throw new Error('Catálogo local no disponible');
+                const materials = await db.getMaterials();
+                const material = materials.find((mat: { codigo_material: string }) =>
+                    mat.codigo_material.trim().toLowerCase() === scannedCode.toLowerCase());
+                if (material) {
+                    await selectMaterial(material, scannerTarget);
+                } else {
+                    Alert.alert('Material no encontrado', 'El código no existe en el catálogo local. Sincronizá los datos o seleccioná el material manualmente.');
+                }
+            } catch {
+                Alert.alert('No se pudo leer el catálogo', 'Intentá nuevamente o seleccioná el material manualmente.');
+            } finally {
+                closeScanner();
+            }
+            return;
+        }
         const items = scannerTarget.type === 'retirado' ? formData.material_retirado : formData.material_entregado;
         const currentItem = items.find(i => i.id === scannerTarget.id);
 
@@ -524,11 +544,11 @@ export default function SoloStockScreen() {
         setShowPickerModal(true);
     };
 
-    const selectMaterial = (mat: any) => {
-        if (!pickerTarget) return;
-        updateMaterialItem(pickerTarget.type, pickerTarget.id, 'material', mat.codigo_material);
-        updateMaterialItem(pickerTarget.type, pickerTarget.id, 'nombre_material', mat.nombre || '');
-        updateMaterialItem(pickerTarget.type, pickerTarget.id, 'unidad_medida', mat.unidad_medida || 'UNIDAD');
+    const selectMaterial = (mat: any, target = pickerTarget) => {
+        if (!target) return;
+        updateMaterialItem(target.type, target.id, 'material', mat.codigo_material);
+        updateMaterialItem(target.type, target.id, 'nombre_material', mat.nombre || '');
+        updateMaterialItem(target.type, target.id, 'unidad_medida', mat.unidad_medida || 'UNIDAD');
         setShowPickerModal(false);
         setPickerTarget(null);
     };
@@ -939,15 +959,22 @@ export default function SoloStockScreen() {
 
             {items.map(item => (
                 <View key={item.id} style={styles.materialCard}>
-                    <TouchableOpacity
-                        style={[styles.materialPickerButton, item.error ? styles.materialPickerButtonError : null]}
-                        onPress={() => openMaterialPicker(type, item.id)}
-                    >
-                        <Text style={item.material ? styles.materialPickerText : styles.materialPickerPlaceholder}>
-                            {item.material ? `${item.material} - ${item.nombre_material || ''}` : 'Seleccionar Material...'}
-                        </Text>
-                        <Ionicons name="chevron-down" size={20} color="#888" />
-                    </TouchableOpacity>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                        <TouchableOpacity
+                            style={[{ flex: 1 }, styles.materialPickerButton, item.error ? styles.materialPickerButtonError : null]}
+                            onPress={() => openMaterialPicker(type, item.id)}
+                        >
+                            <Text style={item.material ? styles.materialPickerText : styles.materialPickerPlaceholder}>
+                                {item.material ? `${item.material} - ${item.nombre_material || ''}` : 'Seleccionar Material...'}
+                            </Text>
+                            <Ionicons name="chevron-down" size={20} color="#888" />
+                        </TouchableOpacity>
+                        <TouchableOpacity style={styles.scanButton} accessibilityRole="button"
+                            accessibilityLabel="Escanear código de material"
+                            onPress={() => openScanner(type, item.id, 'material')}>
+                            <Ionicons name="barcode-outline" size={24} color="#fff" />
+                        </TouchableOpacity>
+                    </View>
 
                     <View style={styles.materialRowInner}>
                         <Text style={styles.miniLabel}>Serie / Cantidad</Text>
@@ -1445,15 +1472,15 @@ export default function SoloStockScreen() {
             <Modal visible={showScannerModal} animationType="slide" onRequestClose={closeScanner}>
                 <View style={styles.scannerContainer}>
                     <View style={styles.scannerHeader}>
-                        <Text style={styles.scannerTitle}>Escanear Código de Barras</Text>
+                        <Text style={styles.scannerTitle}>{scannerTarget?.field === 'material' ? 'Escanear Código de Material' : 'Escanear Código de Barras'}</Text>
                         <TouchableOpacity onPress={closeScanner}>
                             <Ionicons name="close" size={28} color="#fff" />
                         </TouchableOpacity>
                     </View>
 
-                    {permission?.granted ? (
+                    {showScannerModal && permission?.granted ? (
                         <View style={styles.scannerCameraContainer}>
-                            <CameraView
+                            <ScannerCamera
                                 ref={cameraRef}
                                 style={styles.scanner}
                                 facing="back"
@@ -1461,24 +1488,25 @@ export default function SoloStockScreen() {
                                     barcodeTypes: ['ean13', 'ean8', 'code128', 'code39', 'code93', 'upc_a', 'upc_e', 'qr'],
                                 }}
                                 onBarcodeScanned={handleBarCodeScanned}
-                            />
-                            <View style={styles.scanOverlay}>
-                                <View style={styles.scanOverlayTop} />
-                                <View style={styles.scanOverlayMiddle}>
-                                    <View style={styles.scanOverlaySide} />
-                                    <View style={styles.scanFrame}>
-                                        <View style={[styles.cornerMarker, styles.cornerTopLeft]} />
-                                        <View style={[styles.cornerMarker, styles.cornerTopRight]} />
-                                        <View style={[styles.cornerMarker, styles.cornerBottomLeft]} />
-                                        <View style={[styles.cornerMarker, styles.cornerBottomRight]} />
-                                        <View style={styles.scanLine} />
+                            >
+                                <View pointerEvents="none" style={styles.scanOverlay}>
+                                    <View style={styles.scanOverlayTop} />
+                                    <View style={styles.scanOverlayMiddle}>
+                                        <View style={styles.scanOverlaySide} />
+                                        <View style={styles.scanFrame}>
+                                            <View style={[styles.cornerMarker, styles.cornerTopLeft]} />
+                                            <View style={[styles.cornerMarker, styles.cornerTopRight]} />
+                                            <View style={[styles.cornerMarker, styles.cornerBottomLeft]} />
+                                            <View style={[styles.cornerMarker, styles.cornerBottomRight]} />
+                                            <View style={styles.scanLine} />
+                                        </View>
+                                        <View style={styles.scanOverlaySide} />
                                     </View>
-                                    <View style={styles.scanOverlaySide} />
+                                    <View style={styles.scanOverlayBottom}>
+                                        <Text style={styles.scanOverlayText}>Alinee el código dentro del recuadro</Text>
+                                    </View>
                                 </View>
-                                <View style={styles.scanOverlayBottom}>
-                                    <Text style={styles.scanOverlayText}>Alinee el código dentro del recuadro</Text>
-                                </View>
-                            </View>
+                            </ScannerCamera>
                         </View>
                     ) : (
                         <View style={styles.scannerPermission}>
@@ -1492,10 +1520,10 @@ export default function SoloStockScreen() {
 
                     <View style={[styles.scannerFooter, { paddingBottom: Math.max(20, insets.bottom + 20) }]}>
                         <Text style={styles.scannerHint}>Apunte al código de barras</Text>
-                        <TouchableOpacity style={styles.manualCaptureButton} onPress={captureSerialPhoto}>
+                        {scannerTarget?.field !== 'material' && <TouchableOpacity style={styles.manualCaptureButton} onPress={captureSerialPhoto}>
                             <Ionicons name="camera" size={24} color="#fff" />
                             <Text style={styles.manualCaptureText}>Capturar Foto (sin escaneo)</Text>
-                        </TouchableOpacity>
+                        </TouchableOpacity>}
                     </View>
                 </View>
             </Modal>

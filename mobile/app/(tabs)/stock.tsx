@@ -1,3 +1,4 @@
+import ScannerCamera from '../../components/ScannerCamera';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
     View,
@@ -1181,18 +1182,19 @@ export default function StockScreen() {
                             <Text style={styles.modalSectionTitle}>Buscar material:</Text>
 
                             {/* Scanner Camera View for Return */}
-                            {showReturnScanner ? (
+                            {showReturnModal && showReturnScanner ? (
                                 <View style={styles.scannerContainer}>
-                                    <CameraView
+                                    <ScannerCamera
                                         style={styles.scannerCamera}
                                         barcodeScannerSettings={{
                                             barcodeTypes: ['code128', 'code39', 'ean13', 'ean8', 'qr', 'upc_a', 'upc_e'],
                                         }}
                                         onBarcodeScanned={handleReturnBarCodeScanned}
-                                    />
-                                    <View style={styles.scannerOverlay}>
-                                        <View style={styles.scannerFrame} />
-                                    </View>
+                                    >
+                                        <View pointerEvents="none" style={styles.scannerOverlay}>
+                                            <View style={styles.scannerFrame} />
+                                        </View>
+                                    </ScannerCamera>
                                     <TouchableOpacity
                                         style={styles.closeScannerButton}
                                         onPress={() => setShowReturnScanner(false)}
@@ -1447,19 +1449,20 @@ export default function StockScreen() {
                             </Text>
 
                             {/* Scanner Camera View */}
-                            {showVerifyScanner ? (
+                            {showVerifyModal && showVerifyScanner ? (
                                 <View style={styles.scannerContainer}>
-                                    <CameraView
+                                    <ScannerCamera
                                         ref={cameraRef}
                                         style={styles.scannerCamera}
                                         barcodeScannerSettings={{
                                             barcodeTypes: ['code128', 'code39', 'ean13', 'ean8', 'qr', 'upc_a', 'upc_e'],
                                         }}
                                         onBarcodeScanned={handleVerifyBarCodeScanned}
-                                    />
-                                    <View style={styles.scannerOverlay}>
-                                        <View style={styles.scannerFrame} />
-                                    </View>
+                                    >
+                                        <View pointerEvents="none" style={styles.scannerOverlay}>
+                                            <View style={styles.scannerFrame} />
+                                        </View>
+                                    </ScannerCamera>
                                     <TouchableOpacity
                                         style={styles.closeScannerButton}
                                         onPress={() => setShowVerifyScanner(false)}
